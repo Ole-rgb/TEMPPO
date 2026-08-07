@@ -1,0 +1,4 @@
+# PPO+RND+LLM -- PROPOSED
+name: rnd_llm
+beta_rnd: ${rnd.beta}
+beta_llm: ${llm.beta}

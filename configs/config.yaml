@@ -33,3 +33,19 @@ target_kl: null
 # --- Evaluation --------------------------------------------------------------
 eval_interval: 10      # run an eval every N policy-update iterations
 eval_episodes: 10
+
+# --- Bonus internals ---------------------------------------------------------
+# Held FIXED across every condition. The bonus/ group flips ONLY the two
+# coefficients, so an ablation can never accidentally vary these as well.
+rnd:
+  beta: 0.1
+  predictor_hidden_dim: 64
+  predictor_lr: 1e-4
+  normalize_intrinsic_reward: true
+  normalize_observation: true
+
+llm:
+  beta: 0.5            # the swept coefficient -- this is the headline result
+  subgoal_bonus: 1.0   # reward paid once per subgoal completion
+  model: claude-haiku-4-5
+  cache_path: scripts/subgoal_cache_claude-haiku-4-5.jsonl

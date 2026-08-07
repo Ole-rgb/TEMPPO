@@ -1,4 +1,4 @@
+# PPO -- sanity + motivation (the env should be hard for vanilla PPO)
 name: none
-type: none
 beta_rnd: 0.0
 beta_llm: 0.0

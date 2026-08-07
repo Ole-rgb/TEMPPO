@@ -2,8 +2,12 @@ PYTHON ?= python
 PKG    := rl_final
 
 .PHONY: install format check test clean \
-        train-baseline sweep-entropy sweep-count sweep-rnd \
+        sanity run-ppo run-rnd run-rnd-llm sweep-beta-llm \
         plots reproduce pre-commit
+
+TRAIN := $(PYTHON) -m $(PKG).ppo.ppo_minigrid
+ENV   ?= doorkey_8x8
+SEEDS := 0,21,42
 
 # --- Setup -------------------------------------------------------------------
 
@@ -29,45 +33,37 @@ pre-commit:
 test:
 	pytest tests/ -v
 
-# --- Individual runs (for debugging) -----------------------------------------
+# --- Sanity check (build step 1) ---------------------------------------------
 
-train-baseline:
-	$(PYTHON) -m $(PKG).ppo.train env=empty_8x8 bonus=none seed=0
+sanity:
+	$(TRAIN) --multirun env=empty_5x5 bonus=none seed=$(SEEDS) total_timesteps=60000
 
-# --- Sweeps (main experiments) -----------------------------------------------
+# --- The four conditions (build step 4) --------------------------------------
+# One codebase, flip coefficients. Same env-step budget for all four.
 
-sweep-entropy:
-	$(PYTHON) -m $(PKG).ppo.train --multirun \
-	  env=empty_8x8,doorkey_8x8,multiroom \
-	  bonus=high_entropy \
-	  bonus.c_ent=0.05,0.1,0.2 \
-	  seed=0,1,2,3,4
+run-ppo:                     ## beta_rnd=0, beta_llm=0
+	$(TRAIN) --multirun env=$(ENV) bonus=none    seed=$(SEEDS)
 
-sweep-count:
-	$(PYTHON) -m $(PKG).ppo.train --multirun \
-	  env=empty_8x8,doorkey_8x8,multiroom \
-	  bonus=count \
-	  bonus.beta=0.01,0.1,1.0 \
-	  seed=0,1,2,3,4
+run-rnd:                     ## BASELINE
+	$(TRAIN) --multirun env=$(ENV) bonus=rnd     seed=$(SEEDS)
 
-sweep-rnd:
-	$(PYTHON) -m $(PKG).ppo.train --multirun \
-	  env=empty_8x8,doorkey_8x8,multiroom \
-	  bonus=rnd \
-	  bonus.beta=0.01,0.1,1.0 \
-	  seed=0,1,2,3,4
+run-rnd-llm:                 ## PROPOSED
+	$(TRAIN) --multirun env=$(ENV) bonus=rnd_llm seed=$(SEEDS)
+
+# The headline result: beta_rnd held fixed, beta_llm swept.
+sweep-beta-llm:
+	$(TRAIN) --multirun env=$(ENV) bonus=rnd_llm seed=$(SEEDS) llm.beta=0.1,0.25,0.5,1.0
 
 # --- Analysis ----------------------------------------------------------------
 
 plots:
-	$(PYTHON) scripts/make_plots.py
+	$(PYTHON) -m $(PKG).analysis.plots
 
 # One command reproduces the whole study. Use for the final submission.
-reproduce: sweep-entropy sweep-count sweep-rnd plots
+reproduce: sweep-beta-llm run-ppo run-rnd run-rnd-llm plots
 
 # --- Cleanup -----------------------------------------------------------------
 
 clean:
-	rm -rf data/runs/*
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type d -name .pytest_cache -exec rm -rf {} +

@@ -1,0 +1,4 @@
+# PPO+LLM -- KEY ABLATION: does the LLM signal add anything beyond novelty?
+name: llm
+beta_rnd: 0.0
+beta_llm: ${llm.beta}
