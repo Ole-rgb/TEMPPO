@@ -15,7 +15,7 @@ import random
 import time
 from pathlib import Path
 
-#from dataclasses import dataclass
+# from dataclasses import dataclass
 import gymnasium as gym
 import hydra
 import numpy as np
@@ -26,79 +26,22 @@ from hydra.core.hydra_config import HydraConfig
 from minigrid.wrappers import ImgObsWrapper
 from omegaconf import DictConfig, OmegaConf
 
-#import tyro
+# import tyro
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-# @dataclass
-# class Args:
-#     exp_name: str = os.path.basename(__file__)[: -len(".py")]
-#     """the name of this experiment"""
-#     seed: int = 1
-#     """seed of the experiment"""
-#     torch_deterministic: bool = True
-#     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-#     cuda: bool = True
-#     """if toggled, cuda will be enabled by default"""
-#     track: bool = False
-#     """if toggled, this experiment will be tracked with Weights and Biases"""
-#     wandb_project_name: str = "cleanRL"
-#     """the wandb's project name"""
-#     wandb_entity: str = None
-#     """the entity (team) of wandb's project"""
-#     capture_video: bool = False
-#     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
-#     # Algorithm specific arguments
-#     env_id: str = "BreakoutNoFrameskip-v4"
-#     """the id of the environment"""
-#     total_timesteps: int = 10000000
-#     """total timesteps of the experiments"""
-#     learning_rate: float = 2.5e-4
-#     """the learning rate of the optimizer"""
-#     num_envs: int = 8
-#     """the number of parallel game environments"""
-#     num_steps: int = 128
-#     """the number of steps to run in each environment per policy rollout"""
-#     anneal_lr: bool = True
-#     """Toggle learning rate annealing for policy and value networks"""
-#     gamma: float = 0.99
-#     """the discount factor gamma"""
-#     gae_lambda: float = 0.95
-#     """the lambda for the general advantage estimation"""
-#     num_minibatches: int = 4
-#     """the number of mini-batches"""
-#     update_epochs: int = 4
-#     """the K epochs to update the policy"""
-#     norm_adv: bool = True
-#     """Toggles advantages normalization"""
-#     clip_coef: float = 0.1
-#     """the surrogate clipping coefficient"""
-#     clip_vloss: bool = True
-#     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-#     ent_coef: float = 0.01
-#     """coefficient of the entropy"""
-#     vf_coef: float = 0.5
-#     """coefficient of the value function"""
-#     max_grad_norm: float = 0.5
-#     """the maximum norm for the gradient clipping"""
-#     target_kl: float = None
-#     """the target KL divergence threshold"""
+def make_env(env_id, idx, video_dir=None):
+    """video_dir: absolute path to record into, or None for no recording.
 
-#     # to be filled in runtime
-#     batch_size: int = 0
-#     """the batch size (computed in runtime)"""
-#     minibatch_size: int = 0
-#     """the mini-batch size (computed in runtime)"""
-#     num_iterations: int = 0
-#     """the number of iterations (computed in runtime)"""
+    Only episode 0 is recorded. Callers pass a *step-specific* directory so
+    successive evals don't overwrite each other's rl-video-episode-0.mp4.
+    """
 
-
-def make_env(env_id, idx, capture_video, run_name):
     def thunk():
-        if capture_video and idx == 0:
+        if video_dir is not None and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            env = gym.wrappers.RecordVideo(env, str(video_dir), episode_trigger=lambda ep: ep == 0)
         else:
             env = gym.make(env_id)
         return ImgObsWrapper(env)
@@ -154,14 +97,16 @@ class Agent(nn.Module):
 EVAL_SEED_BASE = 10_000
 
 
-def evaluate(agent, env_id, num_episodes, device):
+def evaluate(agent, env_id, num_episodes, device, video_dir=None):
     """Mean episodic return of the current policy on a fresh, single env.
 
     Actions are sampled rather than taken greedily: an argmax policy in MiniGrid can
     deadlock (e.g. turning into a wall forever) and would report 0 for a policy that
     is in fact learning.
+
+    Passing video_dir records episode 0 of this eval to an mp4.
     """
-    env = make_env(env_id, 0, False, "")()
+    env = make_env(env_id, 0, video_dir)()
     returns = []
     for ep in range(num_episodes):
         obs, _ = env.reset(seed=EVAL_SEED_BASE + ep)
@@ -185,7 +130,6 @@ def main(cfg: DictConfig) -> None:
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # Per-seed subdir so a --multirun sweep drops eval_rewards.csv / agent.pt where the
     # analysis code expects them: <base>/seed_<N>/
@@ -196,10 +140,13 @@ def main(cfg: DictConfig) -> None:
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n{}".format(
-        "\n".join([f"|{key}|{value}|" for key, value in OmegaConf.to_container(
-                cfg, resolve=True).items()]
+            "\n".join(
+                [
+                    f"|{key}|{value}|"
+                    for key, value in OmegaConf.to_container(cfg, resolve=True).items()
+                ]
             )
-    ),
+        ),
     )
 
     # TRY NOT TO MODIFY: seeding
@@ -212,7 +159,7 @@ def main(cfg: DictConfig) -> None:
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
+        [make_env(args.env_id, i) for i in range(args.num_envs)],
     )
     envs = gym.wrappers.vector.RecordEpisodeStatistics(envs)
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
@@ -229,7 +176,10 @@ def main(cfg: DictConfig) -> None:
     eval_csv.writerow(["eval_steps", "eval_rewards"])
 
     def run_eval():
-        mean_return = evaluate(agent, args.env_id, args.eval_episodes, device)
+        # One mp4 per eval, in a step-named folder, so you can watch the policy
+        # improve across training instead of overwriting a single file.
+        video_dir = run_dir / "videos" / f"step_{global_step:08d}" if args.capture_video else None
+        mean_return = evaluate(agent, args.env_id, args.eval_episodes, device, video_dir)
         eval_csv.writerow([global_step, mean_return])
         eval_file.flush()
         writer.add_scalar("charts/eval_return", mean_return, global_step)
@@ -284,10 +234,9 @@ def main(cfg: DictConfig) -> None:
             if "episode" in infos:
                 mask = infos["_episode"]
                 rs, ls = infos["episode"]["r"][mask], infos["episode"]["l"][mask]
-                for r, ln in zip(rs,ls, strict=False):
+                for r, ln in zip(rs, ls, strict=False):
                     writer.add_scalar("charts/episodic_return", r, global_step)
                     writer.add_scalar("charts/episodic_length", ln, global_step)
-
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -388,8 +337,14 @@ def main(cfg: DictConfig) -> None:
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+        print(
+            f"iter {iteration:4d}/{args.num_iterations}  "
+            f"steps {global_step:>8,}  "
+            f"ent {entropy_loss.item():5.3f}  kl {approx_kl.item():.4f}  "
+            f"clip {np.mean(clipfracs):.3f}  ev {explained_var:5.2f}"
+        )
 
         if iteration % args.eval_interval == 0:
             print(f"iter {iteration}/{args.num_iterations}  eval_return={run_eval():.3f}")
