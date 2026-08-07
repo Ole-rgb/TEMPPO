@@ -49,10 +49,13 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B"]
-ignore = ["N806", "B008"]
+ignore = ["N806", "N803", "B008"]
 
 # --- Pytest -----------------------------------------------------------------
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not slow'"
 testpaths = ["tests"]
+markers = [
+    "slow: end-to-end runs that actually train (deselected by default; `pytest -m slow`)",
+]
