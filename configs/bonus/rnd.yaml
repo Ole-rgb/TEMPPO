@@ -1,0 +1,7 @@
+name: rnd
+type: rnd
+beta: 0.1
+predictor_hidden_dim: 64
+predictor_lr: 1e-4
+normalize_intrinsic_reward: true
+normalize_observation: false

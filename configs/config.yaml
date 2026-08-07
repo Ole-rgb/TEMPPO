@@ -1,0 +1,35 @@
+defaults:
+  - env: empty_5x5
+  - bonus: none
+  - _self_
+
+exp_name: ppo_minigrid
+seed: 0
+torch_deterministic: true
+cuda: true
+capture_video: false
+
+# `env_id` is what the training script reads; the env group owns the actual value.
+env_id: ${env.gym_id}
+
+# --- PPO ---------------------------------------------------------------------
+total_timesteps: 100000
+learning_rate: 2.5e-4
+num_envs: 4
+num_steps: 128
+anneal_lr: true
+gamma: 0.99
+gae_lambda: 0.95
+num_minibatches: 4
+update_epochs: 4
+norm_adv: true
+clip_coef: 0.2
+clip_vloss: true
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+target_kl: null
+
+# --- Evaluation --------------------------------------------------------------
+eval_interval: 10      # run an eval every N policy-update iterations
+eval_episodes: 10
