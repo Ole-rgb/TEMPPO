@@ -196,6 +196,7 @@ def main(cfg: DictConfig) -> None:
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    terminateds = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -203,6 +204,7 @@ def main(cfg: DictConfig) -> None:
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+    next_terminated = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -215,6 +217,7 @@ def main(cfg: DictConfig) -> None:
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+            terminateds[step] = next_terminated
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
@@ -227,9 +230,10 @@ def main(cfg: DictConfig) -> None:
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = (
+            next_obs, next_done, next_terminated = (
                 torch.Tensor(next_obs).to(device),
                 torch.Tensor(next_done).to(device),
+                torch.Tensor(terminations).to(device),
             )
             if "episode" in infos:
                 mask = infos["_episode"]
@@ -245,14 +249,16 @@ def main(cfg: DictConfig) -> None:
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
                 if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
+                    nextnonboundary = 1.0 - next_done
+                    nextnonterminal = 1.0 - next_terminated
                     nextvalues = next_value
                 else:
-                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextnonboundary = 1.0 - dones[t + 1]
+                    nextnonterminal = 1.0 - terminateds[t + 1]
                     nextvalues = values[t + 1]
                 delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
                 advantages[t] = lastgaelam = (
-                    delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                    delta + args.gamma * args.gae_lambda * nextnonboundary * lastgaelam
                 )
             returns = advantages + values
 
