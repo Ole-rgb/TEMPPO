@@ -50,10 +50,9 @@ Results land in `outputs/<date>/<time>/`, or `outputs/<sweep>/<job>/` under `--m
 <run_dir>/
 ├── .hydra/config.yaml          fully resolved config for this run
 ├── ppo_minigrid.log
-└── seed_0/
-    ├── eval_rewards.csv        columns: eval_steps, eval_rewards
-    ├── agent.pt                final weights
-    └── events.out.tfevents.*   TensorBoard scalars
+├── eval_rewards.csv            columns: eval_steps, eval_rewards
+├── agent.pt                    final weights
+└── events.out.tfevents.*       TensorBoard scalars
 ```
 Inspect the curves with `tensorboard --logdir outputs`.
 
@@ -65,9 +64,9 @@ python -m rl_final.ppo.ppo_minigrid env=doorkey_8x8 capture_video=true
 You get one mp4 per evaluation, each in a step-named folder so successive evals
 never overwrite each other:
 ```
-<run_dir>/seed_0/videos/step_00005120/rl-video-episode-0.mp4
-                        step_00010240/rl-video-episode-0.mp4
-                        ...
+<run_dir>/videos/step_00005120/rl-video-episode-0.mp4
+                 step_00010240/rl-video-episode-0.mp4
+                 ...
 ```
 Watching them in order shows how the policy changes over training. Only episode 0
 of each eval is recorded, and eval episodes use fixed seeds, so every video shows

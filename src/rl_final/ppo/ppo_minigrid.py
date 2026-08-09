@@ -192,9 +192,15 @@ def collect_rollout(agent, envs, buf, next_obs, next_done, next_terminated, glob
 
 
 def compute_gae(
-    rewards, values, dones, terminateds,
-    next_value, next_done, next_terminated,
-    gamma, gae_lambda,
+    rewards,
+    values,
+    dones,
+    terminateds,
+    next_value,
+    next_done,
+    next_terminated,
+    gamma,
+    gae_lambda,
 ):
     """
     Generalized Advantage Estimation over one rollout. Returns: (advantages, returns)
@@ -214,6 +220,7 @@ def compute_gae(
         delta = rewards[t] + gamma * nextvalues * nonterminal - values[t]
         advantages[t] = lastgaelam = delta + gamma * gae_lambda * nonboundary * lastgaelam
     return advantages, advantages + values
+
 
 def ppo_update(agent, optimizer, batch, args):
     """`update_epochs` passes over the batch, each split into `num_minibatches`.
@@ -336,9 +343,7 @@ def main(cfg: DictConfig) -> None:
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
 
-    # Per-seed subdir so a --multirun sweep drops eval_rewards.csv / agent.pt where the
-    # analysis code expects them: <base>/seed_<N>/
-    run_dir = Path(HydraConfig.get().runtime.output_dir) / f"seed_{args.seed}"
+    run_dir = Path(HydraConfig.get().runtime.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(run_dir))
 
@@ -418,9 +423,15 @@ def main(cfg: DictConfig) -> None:
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages, returns = compute_gae(
-                buf.rewards, buf.values, buf.dones, buf.terminateds,
-                next_value, next_done, next_terminated,
-                args.gamma, args.gae_lambda,
+                buf.rewards,
+                buf.values,
+                buf.dones,
+                buf.terminateds,
+                next_value,
+                next_done,
+                next_terminated,
+                args.gamma,
+                args.gae_lambda,
             )
 
         metrics = ppo_update(agent, optimizer, buf.flatten(advantages, returns), args)
@@ -441,7 +452,10 @@ def main(cfg: DictConfig) -> None:
         if iteration % args.eval_interval == 0:
             print(f"iter {iteration}/{args.num_iterations}  eval_return={run_eval():.3f}")
 
-    print(f"final eval_return={run_eval():.3f}")
+    # Only if the loop's last iteration was not itself an eval point.
+    if args.num_iterations % args.eval_interval:
+        print(f"final eval_return={run_eval():.3f}")
+
     torch.save(agent.state_dict(), run_dir / "agent.pt")
 
     eval_file.close()

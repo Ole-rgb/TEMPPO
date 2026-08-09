@@ -3,6 +3,10 @@ defaults:
   - bonus: none
   - _self_
 
+hydra:
+  sweep:
+    subdir: ${hydra.job.override_dirname}
+
 exp_name: ppo_minigrid
 seed: 0
 torch_deterministic: true
