@@ -3,7 +3,7 @@ PROTOTYPE: rliable plots.
 
 Run:
     python -m rl_final.analysis.plots \
-        --run-dir multirun/2026-08-07/23-49-39 --env doorkey_5x5
+        --run-dir multirun/<date>/<time>
 """
 
 import argparse
@@ -37,8 +37,11 @@ parser = argparse.ArgumentParser(description="rliable sample-efficiency curve (p
 parser.add_argument(
     "--run-dir",
     type=Path,
+    nargs="+",
     required=True,
-    help="ONE Hydra output dir, e.g. multirun/2026-08-07/23-49-39",
+    help="One or more Hydra output dirs, e.g. multirun/2026-08-07/23-49-39. "
+    "Several are merged, so a baseline swept on one day can be compared against "
+    "another condition swept later. They must not repeat an (env, condition, seed).",
 )
 parser.add_argument("--env", nargs="+", default=None)
 parser.add_argument("--metric", choices=list(METRICS), default="iqm")
