@@ -9,4 +9,6 @@ __pycache__/
 .ruff_cache/
 data/
 runs/
+multirun/
+figures/
 .env
