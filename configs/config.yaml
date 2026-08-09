@@ -3,10 +3,6 @@ defaults:
   - bonus: none
   - _self_
 
-hydra:
-  sweep:
-    subdir: ${hydra.job.override_dirname}
-
 exp_name: ppo_minigrid
 seed: 0
 torch_deterministic: true
@@ -42,14 +38,14 @@ eval_episodes: 10
 # Held FIXED across every condition. The bonus/ group flips ONLY the two
 # coefficients, so an ablation can never accidentally vary these as well.
 rnd:
-  beta: 0.1
+  beta: 0.001
   predictor_hidden_dim: 64
-  predictor_lr: 1e-4
+  predictor_lr: 1e-3
+  embed_dim: 64
   normalize_intrinsic_reward: true
-  normalize_observation: true
 
 llm:
-  beta: 0.5            # the swept coefficient -- this is the headline result
-  subgoal_bonus: 1.0   # reward paid once per subgoal completion
+  beta: 0.5
+  subgoal_bonus: 1.0
   model: claude-haiku-4-5
   cache_path: scripts/subgoal_cache_claude-haiku-4-5.jsonl
