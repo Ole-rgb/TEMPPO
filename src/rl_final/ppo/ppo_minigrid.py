@@ -31,6 +31,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+from rl_final.ppo.rnd import RND
+
 
 def make_env(env_id, idx, video_dir=None):
     """video_dir: absolute path to record into, or None for no recording.
@@ -105,6 +107,7 @@ class Rollout:
     actions: torch.Tensor
     logprobs: torch.Tensor
     rewards: torch.Tensor
+    int_rewards: torch.Tensor  # Raw RND prediction error
     dones: torch.Tensor
     terminateds: torch.Tensor
     values: torch.Tensor
@@ -119,6 +122,7 @@ class Rollout:
             actions=zeros(envs.single_action_space.shape),
             logprobs=zeros(),
             rewards=zeros(),
+            int_rewards=zeros(),
             dones=zeros(),
             terminateds=zeros(),
             values=zeros(),
@@ -152,12 +156,17 @@ class Batch:
     returns: torch.Tensor
 
 
-def collect_rollout(agent, envs, buf, next_obs, next_done, next_terminated, global_step, device):
+def collect_rollout(
+    agent, envs, buf, next_obs, next_done, next_terminated, global_step, device, rnd=None
+):
     """Fill `buf` with one rollout. The policy is frozen throughout (no_grad), which is
     what makes the stored logprobs a valid `pi_old` for the whole update.
 
     Returns the carried state plus the episodes that finished, as
     (global_step, episodic_return, episodic_length) triples for the caller to log.
+
+    `rnd=None` is the vanilla path: `buf.int_rewards` is left untouched at zero and
+    not a single RND op runs, so the beta_rnd=0 conditions are unaffected.
     """
     num_steps, num_envs = buf.rewards.shape
     episode_stats = []
@@ -183,6 +192,8 @@ def collect_rollout(agent, envs, buf, next_obs, next_done, next_terminated, glob
             torch.Tensor(np.logical_or(terminations, truncations)).to(device),
             torch.Tensor(terminations).to(device),
         )
+        if rnd is not None:
+            buf.int_rewards[step] = rnd.intrinsic_reward(next_obs)
         if "episode" in infos:
             mask = infos["_episode"]
             rs, ls = infos["episode"]["r"][mask], infos["episode"]["l"][mask]
@@ -228,6 +239,9 @@ def ppo_update(agent, optimizer, batch, args):
     Mutates the agent in place; returns the diagnostics that get logged. Note the
     returned losses are from the LAST minibatch of the last epoch, not averages --
     only clipfrac is accumulated across all of them.
+
+    Knows nothing about RND: the bonus is already inside `batch.advantages` by the time
+    it gets here, and the predictor is trained separately by the caller.
     """
     b_inds = np.arange(args.batch_size)
     clipfracs = []
@@ -381,6 +395,13 @@ def main(cfg: DictConfig) -> None:
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    # The BONUS GROUP decides whether RND exists -- never cfg.rnd.beta
+    beta_rnd = float(cfg.bonus.beta_rnd)
+    rnd = None
+    if beta_rnd > 0:
+        # Built after seeding, so each seed gets its own reproducible random target.
+        rnd = RND(cfg, envs, device)
+
     eval_file = open(run_dir / "eval_rewards.csv", "w", newline="")
     eval_csv = csv.writer(eval_file)
     eval_csv.writerow(["eval_steps", "eval_rewards"])
@@ -413,17 +434,23 @@ def main(cfg: DictConfig) -> None:
             optimizer.param_groups[0]["lr"] = lrnow
 
         next_obs, next_done, next_terminated, global_step, episode_stats = collect_rollout(
-            agent, envs, buf, next_obs, next_done, next_terminated, global_step, device
+            agent, envs, buf, next_obs, next_done, next_terminated, global_step, device, rnd
         )
         for gs, ep_return, ep_length in episode_stats:
             writer.add_scalar("charts/episodic_return", ep_return, gs)
             writer.add_scalar("charts/episodic_length", ep_length, gs)
 
+        rewards = buf.rewards
+        if rnd is not None:
+            scaled_int_rewards = rnd.normalize_rewards(buf.int_rewards)
+            rewards = buf.rewards + beta_rnd * scaled_int_rewards
+            rnd_loss = rnd.update(buf.obs)
+
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages, returns = compute_gae(
-                buf.rewards,
+                rewards,
                 buf.values,
                 buf.dones,
                 buf.terminateds,
@@ -438,6 +465,21 @@ def main(cfg: DictConfig) -> None:
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        if rnd is not None:
+            # The raw mean must DECAY as states stop being novel
+            writer.add_scalar(
+                "charts/intrinsic_reward_mean", buf.int_rewards.mean().item(), global_step
+            )
+            writer.add_scalar(
+                "charts/intrinsic_reward_std", buf.int_rewards.std().item(), global_step
+            )
+            # compare against episodic_return to see how much the bonus dominates.
+            writer.add_scalar(
+                "charts/intrinsic_reward_scaled_mean",
+                (beta_rnd * scaled_int_rewards).mean().item(),
+                global_step,
+            )
+            writer.add_scalar("losses/rnd_predictor_loss", rnd_loss, global_step)
         for tag, val in metrics.items():
             writer.add_scalar(tag, val, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)

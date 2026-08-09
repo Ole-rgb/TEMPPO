@@ -8,6 +8,7 @@ Hydra run dirs -> Run objects.
 (env, condition, seed).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,8 +104,8 @@ def discover_runs(roots: list[Path]) -> list[Run]:
 def check_unique_seeds(runs: list[Run]) -> None:
     """Assert one run per (env, condition, seed); raise naming both offenders.
 
-    Hydra cannot produce a collision inside one sweep, so hitting this means
-    `root` spans several.
+    Hydra cannot collide inside one sweep, so this fires when the roots overlap --
+    either a parent of several sweeps, or two sweeps that repeat a condition.
     """
     seen: dict[tuple[str, str, int], Path] = {}
     for run in runs:
@@ -113,18 +114,23 @@ def check_unique_seeds(runs: list[Run]) -> None:
             raise ValueError(
                 f"two runs share (env={run.env}, condition={run.condition}, "
                 f"seed={run.seed}):\n    {seen[key]}\n    {run.run_dir}\n"
-                f"point `root` at a single sweep dir, not a parent of several"
+                f"pass sweep dirs that do not overlap, not a parent of several"
             )
         seen[key] = run.run_dir
 
 
-def load(root: Path | str, env=None) -> list[Run]:
-    """Load one sweep: discover, check for seed collisions, filter, sort.
+def load(roots: Path | str | Iterable[Path | str], env=None) -> list[Run]:
+    """Load one or more sweeps: discover, check for seed collisions, filter, sort.
 
-    `root` is Hydra output dir -- `multirun/<date>/<time>/` for a sweep or
-    `outputs/<date>/<time>/` for a single run.
+    Each root is a Hydra output dir -- `multirun/<date>/<time>/` for a sweep or
+    `outputs/<date>/<time>/` for a single run. Passing several merges them, which is
+    how you compare conditions that were swept separately (a PPO baseline from one
+    day against PPO+RND from another) without copying directories around. They must
+    not overlap; `check_unique_seeds` enforces that.
     """
-    runs = discover_runs([Path(root)])
+    if isinstance(roots, str | Path):
+        roots = [roots]
+    runs = discover_runs([Path(r) for r in roots])
     check_unique_seeds(runs)
     if env is not None:
         wanted = {env} if isinstance(env, str) else set(env)
