@@ -44,6 +44,14 @@ parser.add_argument(
     "another condition swept later. They must not repeat an (env, condition, seed).",
 )
 parser.add_argument("--env", nargs="+", default=None)
+parser.add_argument(
+    "--success-threshold",
+    type=float,
+    default=0.5,
+    help="eval return counted as 'solved' in the performance profile. MiniGrid pays "
+    "1 - 0.9*steps/max_steps and eval averages 10 episodes, so 0.5 ~= 'solves more "
+    "often than not' and 0.9 ~= 'solves nearly every episode'.",
+)
 parser.add_argument("--metric", choices=list(METRICS), default="iqm")
 parser.add_argument(
     "--reps",
@@ -258,6 +266,47 @@ def per_env_curves(score_dict, eval_steps, tasks, metric="iqm", reps: int = 50_0
     return fig
 
 
+def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=None):
+    """Fraction of runs scoring above tau, swept across tau.
+
+    The dashed line marks `threshold`. `evaluate()` averages 10 episodes -- an eval
+    return of tau is therefore roughly "solved tau/0.95".
+    0.5 means "solves more often than not"; 0.9 means "solves nearly every episode".
+    """
+    final = {cond: scores[..., -1] for cond, scores in score_dict.items()}
+    taus = np.linspace(0.0, 1.0, 101)
+    profiles, profile_cis = rly.create_performance_profile(final, taus, reps=reps)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    plot_utils.plot_performance_profiles(
+        profiles,
+        taus,
+        performance_profile_cis=profile_cis,
+        xlabel=r"Eval return ($\tau$)",
+        ax=ax,
+    )
+
+    i = int(np.abs(taus - threshold).argmin())
+    ax.axvline(threshold, color="0.35", linestyle="--", linewidth=1, zorder=0)
+    ax.set_title(
+        "  |  ".join(f"{c}: {profiles[c][i]:.0%} > {threshold:g}" for c in sorted(profiles)),
+        fontsize=9,
+    )
+    ax.legend(fontsize=9, loc="upper right")
+    fig.tight_layout()
+
+    print(f"\nfraction of runs with final eval return > {threshold:g}:")
+    for cond in sorted(profiles):
+        lo, hi = profile_cis[cond][0][i], profile_cis[cond][1][i]
+        print(f"  {cond:<28} {profiles[cond][i]:.0%}   95% CI [{lo:.0%}, {hi:.0%}]")
+
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        print(f"wrote {out}")
+    return profiles, profile_cis
+
+
 def main():
 
     runs = load(args.run_dir)
@@ -293,6 +342,12 @@ def main():
         metric=args.metric,
         reps=args.reps,
         out=args.out_dir / f"per_env_{args.metric}.png",
+    )
+    performance_profile_plot(
+        score_dict,
+        reps=args.reps,
+        threshold=args.success_threshold,
+        out=args.out_dir / "performance_profile.png",
     )
 
 
