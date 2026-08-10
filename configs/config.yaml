@@ -41,7 +41,7 @@ rnd:
   beta: 0.001
   predictor_hidden_dim: 64
   predictor_lr: 1e-3
-  embed_dim: 64
+  embed_dim: 512
   normalize_intrinsic_reward: true
 
 llm:
