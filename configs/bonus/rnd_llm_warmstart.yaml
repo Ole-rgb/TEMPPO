@@ -1,0 +1,14 @@
+# PPO+RND+LLM with the subgoal bonus annealed OFF -- the warm-start condition.
+#
+# beta_llm decays linearly to 0 over `anneal_llm_steps` env steps, so the LLM shapes
+# early exploration and then hands the asymptote back to PPO+RND. This is the condition
+# that tests whether the lower plateau of constant-beta rnd_llm is shaping bias (it
+# should recover) or premature convergence (it should not).
+#
+# Sweep the horizon from the CLI: bonus.anneal_llm_steps=150000,300000
+# The two endpoints of that schedule study are already conditions in their own right:
+# anneal_llm_steps -> 0 is `rnd`, and no annealing at all is `rnd_llm`.
+name: rnd_llm_warmstart
+beta_rnd: ${rnd.beta}
+beta_llm: ${llm.beta}
+anneal_llm_steps: 150000

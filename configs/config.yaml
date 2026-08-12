@@ -47,5 +47,7 @@ rnd:
 llm:
   beta: 0.5
   subgoal_bonus: 1.0
-  model: claude-haiku-4-5
-  cache_path: scripts/subgoal_cache_claude-haiku-4-5.jsonl
+  model: claude-opus-4-8
+  cache_path: scripts/subgoal_cache_claude-opus-4-8.jsonl
+  cache_only: false
+  skip_go_to_goal: false

@@ -2,3 +2,4 @@
 name: llm
 beta_rnd: 0.0
 beta_llm: ${llm.beta}
+anneal_llm_steps: 0
