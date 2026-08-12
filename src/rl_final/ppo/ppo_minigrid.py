@@ -31,7 +31,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from rl_final.ppo.rnd import RND
+from rl_final.bonus.llm import LLMBonus, anneal_factor
+from rl_final.bonus.rnd import RND
 
 
 def make_env(env_id, idx, video_dir=None):
@@ -108,6 +109,7 @@ class Rollout:
     logprobs: torch.Tensor
     rewards: torch.Tensor
     int_rewards: torch.Tensor  # Raw RND prediction error
+    llm_rewards: torch.Tensor  # subgoal_bonus per LLM subgoal completed this step
     dones: torch.Tensor
     terminateds: torch.Tensor
     values: torch.Tensor
@@ -123,6 +125,7 @@ class Rollout:
             logprobs=zeros(),
             rewards=zeros(),
             int_rewards=zeros(),
+            llm_rewards=zeros(),
             dones=zeros(),
             terminateds=zeros(),
             values=zeros(),
@@ -157,7 +160,16 @@ class Batch:
 
 
 def collect_rollout(
-    agent, envs, buf, next_obs, next_done, next_terminated, global_step, device, rnd=None
+    agent,
+    envs,
+    buf,
+    next_obs,
+    next_done,
+    next_terminated,
+    global_step,
+    device,
+    rnd=None,
+    llm=None,
 ):
     """Fill `buf` with one rollout. The policy is frozen throughout (no_grad), which is
     what makes the stored logprobs a valid `pi_old` for the whole update.
@@ -165,8 +177,8 @@ def collect_rollout(
     Returns the carried state plus the episodes that finished, as
     (global_step, episodic_return, episodic_length) triples for the caller to log.
 
-    `rnd=None` is the vanilla path: `buf.int_rewards` is left untouched at zero and
-    not a single RND op runs, so the beta_rnd=0 conditions are unaffected.
+    `rnd=None` / `llm=None` are the vanilla paths: the matching buffer stays at zero and
+    not a single bonus op runs, so the beta=0 conditions are bit-for-bit unaffected.
     """
     num_steps, num_envs = buf.rewards.shape
     episode_stats = []
@@ -194,6 +206,12 @@ def collect_rollout(
         )
         if rnd is not None:
             buf.int_rewards[step] = rnd.intrinsic_reward(next_obs)
+        if llm is not None:
+            buf.llm_rewards[step] = torch.as_tensor(
+                llm.step(np.logical_or(terminations, truncations), terminations),
+                dtype=torch.float32,
+                device=device,
+            )
         if "episode" in infos:
             mask = infos["_episode"]
             rs, ls = infos["episode"]["r"][mask], infos["episode"]["l"][mask]
@@ -395,8 +413,11 @@ def main(cfg: DictConfig) -> None:
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # The BONUS GROUP decides whether RND exists -- never cfg.rnd.beta
+    # The BONUS GROUP decides which bonuses exist -- never cfg.rnd.beta / cfg.llm.beta
     beta_rnd = float(cfg.bonus.beta_rnd)
+    beta_llm = float(cfg.bonus.beta_llm)
+    # Warm start: 0 (the default for every non-annealed condition) holds beta_llm flat.
+    anneal_llm_steps = int(cfg.bonus.get("anneal_llm_steps", 0))
     rnd = None
     if beta_rnd > 0:
         # Built after seeding, so each seed gets its own reproducible random target.
@@ -426,6 +447,8 @@ def main(cfg: DictConfig) -> None:
     next_done = torch.zeros(args.num_envs).to(device)
     next_terminated = torch.zeros(args.num_envs).to(device)
 
+    llm = LLMBonus(cfg, envs) if beta_llm > 0 else None
+
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -434,7 +457,7 @@ def main(cfg: DictConfig) -> None:
             optimizer.param_groups[0]["lr"] = lrnow
 
         next_obs, next_done, next_terminated, global_step, episode_stats = collect_rollout(
-            agent, envs, buf, next_obs, next_done, next_terminated, global_step, device, rnd
+            agent, envs, buf, next_obs, next_done, next_terminated, global_step, device, rnd, llm
         )
         for gs, ep_return, ep_length in episode_stats:
             writer.add_scalar("charts/episodic_return", ep_return, gs)
@@ -443,8 +466,11 @@ def main(cfg: DictConfig) -> None:
         rewards = buf.rewards
         if rnd is not None:
             scaled_int_rewards = rnd.normalize_rewards(buf.int_rewards)
-            rewards = buf.rewards + beta_rnd * scaled_int_rewards
+            rewards = rewards + beta_rnd * scaled_int_rewards
             rnd_loss = rnd.update(buf.obs)
+        if llm is not None:
+            beta_llm_now = beta_llm * anneal_factor(global_step, anneal_llm_steps)
+            rewards = rewards + beta_llm_now * buf.llm_rewards
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -480,6 +506,17 @@ def main(cfg: DictConfig) -> None:
                 global_step,
             )
             writer.add_scalar("losses/rnd_predictor_loss", rnd_loss, global_step)
+        if llm is not None:
+            # The warm-start schedule itself: flat at beta_llm unless it is annealing.
+            writer.add_scalar("charts/beta_llm", beta_llm_now, global_step)
+            # Compare against episodic_return the same way as the RND bonus.
+            writer.add_scalar(
+                "charts/llm_bonus_scaled_mean",
+                (beta_llm_now * buf.llm_rewards).mean().item(),
+                global_step,
+            )
+            for tag, val in llm.stats.items():
+                writer.add_scalar(tag, val, global_step)
         for tag, val in metrics.items():
             writer.add_scalar(tag, val, global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)

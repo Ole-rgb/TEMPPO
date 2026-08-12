@@ -12,3 +12,4 @@ runs/
 multirun/
 figures/
 .env
+logs/

@@ -20,6 +20,7 @@ BONUS_NAMES = {
     "rnd": "PPO+RND",
     "llm": "PPO+LLM",
     "rnd_llm": "PPO+RND+LLM",
+    "rnd_llm_warmstart": "PPO+RND+LLM(warm)",
 }
 
 
@@ -41,12 +42,17 @@ def condition_label(cfg) -> str:
     base = BONUS_NAMES.get(cfg.bonus.name, cfg.bonus.name)
     beta_rnd = float(cfg.bonus.beta_rnd)
     beta_llm = float(cfg.bonus.beta_llm)
+    anneal = int(cfg.bonus.get("anneal_llm_steps", 0) or 0)
+    skip_goal = bool((cfg.get("llm") or {}).get("skip_go_to_goal", False))
 
     parts = []
     if beta_rnd:
         parts.append(f"β_rnd={beta_rnd:g}")
     if beta_llm:
-        parts.append(f"β_llm={beta_llm:g}")
+        decay = f"→0@{anneal / 1000:g}k" if anneal > 0 else ""
+        parts.append(f"β_llm={beta_llm:g}{decay}")
+        if skip_goal:
+            parts.append("no-goal")
     return f"{base} ({', '.join(parts)})" if parts else base
 
 

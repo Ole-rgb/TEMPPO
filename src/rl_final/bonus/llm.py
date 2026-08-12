@@ -33,6 +33,7 @@ Everything is gated on `cfg.bonus.beta_llm > 0`; `cfg.llm.*` holds hyperparamete
 stay FIXED across conditions.
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -465,7 +466,8 @@ def fetch_subgoals(client, model: str, prompt: str) -> list[Subgoal]:
     """One planning call. `anthropic` is imported by the caller, never by training."""
     resp = client.messages.parse(
         model=model,
-        max_tokens=1024,
+        max_tokens=4096,
+        thinking={"type": "adaptive"},
         system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": prompt}],
         output_format=SubgoalList,
@@ -482,16 +484,28 @@ class SubgoalTracker:
     Detection reads the underlying MiniGridEnv rather than the observation, because a
     7x7 egocentric view cannot see whether a door across the map is open.
 
+    `skip_go_to_goal` drops the terminal subgoal when a plan is bound -- see `_replan`.
+    A plan that filters down to nothing simply pays no bonus; that is not a cache miss.
+
     Autoreset timing matters here. Gymnasium's SyncVectorEnv runs AutoresetMode.NEXT_STEP:
     when `done` comes back True the base env still holds the finished episode's final
     state, and the reset lands on the FOLLOWING step. So the plan is refreshed one step
     after `done`, and that step is scored as zero.
     """
 
-    def __init__(self, envs, cache: SubgoalCache, subgoal_bonus: float):
-        self.bases = [e.unwrapped for e in envs.envs]
+    def __init__(
+        self,
+        envs,
+        cache: SubgoalCache,
+        subgoal_bonus: float,
+        planner=None,
+        skip_go_to_goal: bool = True,
+    ):
+        self.bases = [e.unwrapped for e in envs.unwrapped.envs]
         self.cache = cache
         self.subgoal_bonus = float(subgoal_bonus)
+        self.planner = planner  # called on a miss; None = cache-only
+        self.skip_go_to_goal = bool(skip_go_to_goal)
         self.num_envs = len(self.bases)
 
         self.plans: list[list[Subgoal]] = [[] for _ in range(self.num_envs)]
@@ -501,6 +515,7 @@ class SubgoalTracker:
         self._pending_reset = np.zeros(self.num_envs, dtype=bool)
 
         self.misses = 0  # plan classes absent from the cache -- logged, never fatal
+        self.fetched = 0  # plan classes bought from the LLM during this run
         self.completed = 0  # subgoals credited, across all envs
 
         # `grid` exists from __init__ but is EMPTY until reset, so keying an unreset env
@@ -516,11 +531,25 @@ class SubgoalTracker:
     def _replan(self, i: int) -> None:
         # The roles come from THIS layout, so a plan cached as "open c0 then c1 then c0"
         # binds to whatever colours this episode actually drew.
-        key, roles = plan_key_and_roles(self.bases[i])
+        base = self.bases[i]
+        key, roles = plan_key_and_roles(base)
         plan = self.cache.get(key, roles)
+
+        if plan is None and self.planner is not None:
+            # Warm the cache in place. Do this ONCE single-process before a parallel
+            try:
+                fetched = self.planner(base)
+                self.cache.add(key, base.mission, render_map(base), fetched, roles)
+                plan = self.cache.get(key, roles)
+                self.fetched += 1
+            except Exception as exc:  # never let a network blip kill a run
+                print(f"  ! plan fetch failed ({type(exc).__name__}: {exc}); no bonus this episode")
+
         if plan is None:
             self.misses += 1
             plan = []
+        elif self.skip_go_to_goal:
+            plan = [s for s in plan if s.action != "go_to_goal"]
         self.plans[i] = plan
         self.idx[i] = 0
         self._credited_doors[i].clear()
@@ -580,17 +609,49 @@ class SubgoalTracker:
         return bonus
 
 
+def anthropic_planner(model: str):
+    """A callable base -> list[Subgoal], or None if there is no API key."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("  ! no ANTHROPIC_API_KEY (checked env and .env) -- running cache-only")
+        return None
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    return lambda base: fetch_subgoals(client, model, make_prompt(base.mission, render_map(base)))
+
+
+def anneal_factor(global_step: int, anneal_steps: int) -> float:
+    """Linear 1 -> 0 over `anneal_steps` env steps. Always 1.0 when `anneal_steps` <= 0."""
+    if anneal_steps <= 0:
+        return 1.0
+    return max(0.0, 1.0 - global_step / anneal_steps)
+
+
 class LLMBonus:
     """Top-level handle, mirroring `RND`'s role in the training loop.
 
-    Reads only the cache -- a missing plan class costs that episode its bonus and bumps
-    `tracker.misses`, it never blocks training on an API call. Populate the cache with
-    the offline precompute script first.
+    Cache-first: a hit costs nothing and no API call ever happens on a cached class. A
+    MISS falls back to the planner if one is available, otherwise that episode simply
+    gets no bonus and `misses` ticks up -- a run without a key still trains, it just
+    trains as vanilla PPO on the classes it has not seen.
+
+    Warm the cache with ONE short single-process run before a parallel sweep; see
+    `SubgoalTracker._replan` for why concurrent warming is unsafe.
     """
 
     def __init__(self, cfg, envs):
         self.cache = SubgoalCache(cfg.llm.cache_path)
-        self.tracker = SubgoalTracker(envs, self.cache, cfg.llm.subgoal_bonus)
+        planner = anthropic_planner(cfg.llm.model) if not cfg.llm.cache_only else None
+        self.tracker = SubgoalTracker(
+            envs,
+            self.cache,
+            cfg.llm.subgoal_bonus,
+            planner,
+            skip_go_to_goal=cfg.llm.skip_go_to_goal,
+        )
 
     def step(self, dones, terminateds) -> np.ndarray:
         return self.tracker.step(dones, terminateds)
@@ -600,5 +661,6 @@ class LLMBonus:
         return {
             "llm/plan_classes_cached": len(self.cache),
             "llm/plan_cache_misses": self.tracker.misses,
+            "llm/plan_classes_fetched": self.tracker.fetched,
             "llm/subgoals_completed": self.tracker.completed,
         }
