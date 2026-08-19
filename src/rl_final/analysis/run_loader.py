@@ -15,12 +15,25 @@ from pathlib import Path
 import numpy as np
 from omegaconf import OmegaConf
 
+from rl_final.bonus.llm import resolve_anneal_steps
+
 BONUS_NAMES = {
     "none": "PPO",
     "rnd": "PPO+RND",
     "llm": "PPO+LLM",
     "rnd_llm": "PPO+RND+LLM",
     "rnd_llm_warmstart": "PPO+RND+LLM(warm)",
+}
+# KEEP IN SYNC WITH configs/config.yaml -- test_run_loader asserts they match.
+TUNABLE_DEFAULTS = {
+    "ent_coef": 0.01,
+    "learning_rate": 2.5e-4,
+    "vf_coef": 0.5,
+    "clip_coef": 0.2,
+    "gae_lambda": 0.95,
+    "gamma": 0.99,
+    "update_epochs": 4,
+    "num_minibatches": 4,
 }
 
 
@@ -42,8 +55,12 @@ def condition_label(cfg) -> str:
     base = BONUS_NAMES.get(cfg.bonus.name, cfg.bonus.name)
     beta_rnd = float(cfg.bonus.beta_rnd)
     beta_llm = float(cfg.bonus.beta_llm)
-    anneal = int(cfg.bonus.get("anneal_llm_steps", 0) or 0)
+    # Resolved, not raw: a run configured with anneal_llm_frac must land on the same
+    # label as the equivalent anneal_llm_steps run, or the two forms split one
+    # condition in two.
+    anneal = resolve_anneal_steps(cfg)
     skip_goal = bool((cfg.get("llm") or {}).get("skip_go_to_goal", False))
+    shuffled = bool((cfg.get("llm") or {}).get("shuffle_plan", False))
 
     parts = []
     if beta_rnd:
@@ -53,6 +70,26 @@ def condition_label(cfg) -> str:
         parts.append(f"β_llm={beta_llm:g}{decay}")
         if skip_goal:
             parts.append("no-goal")
+        if shuffled:
+            parts.append("shuffled")
+        # Redundant with beta_llm -- only their product reaches the reward -- so it
+        # is pinned at 1.0 and beta_llm is tuned alone. Tagged if that ever slips.
+        bonus_scale = float((cfg.get("llm") or {}).get("subgoal_bonus", 1.0))
+        if bonus_scale != 1.0:
+            parts.append(f"sg={bonus_scale:g}")
+
+    # Tuned PPO hyperparameters, appended only when they leave their default.
+    for key, default in TUNABLE_DEFAULTS.items():
+        value = cfg.get(key, default)
+        if value is not None and float(value) != float(default):
+            parts.append(f"{key}={float(value):g}")
+
+    if not bool(cfg.get("anneal_lr", True)):
+        parts.append("const-lr")
+    horizon = cfg.get("schedule_timesteps", None)
+    if horizon and int(horizon) != int(cfg.get("total_timesteps", horizon)):
+        parts.append(f"lr-horizon={int(horizon) / 1000:g}k")
+
     return f"{base} ({', '.join(parts)})" if parts else base
 
 

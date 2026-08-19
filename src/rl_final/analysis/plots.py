@@ -1,5 +1,6 @@
 """
-PROTOTYPE: rliable plots.
+rliable figures for the study: sample-efficiency curves, aggregate intervals,
+probability of improvement, per-env panels and a performance profile.
 
 Run:
     python -m rl_final.analysis.plots \
@@ -33,7 +34,7 @@ def step_axis(ax, max_ticks=5):
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1000:g}k" if v else "0"))
 
 
-parser = argparse.ArgumentParser(description="rliable sample-efficiency curve (prototype)")
+parser = argparse.ArgumentParser(description="rliable figures from one or more sweeps")
 parser.add_argument(
     "--run-dir",
     type=Path,
@@ -49,8 +50,8 @@ parser.add_argument(
     type=float,
     default=0.5,
     help="eval return counted as 'solved' in the performance profile. MiniGrid pays "
-    "1 - 0.9*steps/max_steps and eval averages 10 episodes, so 0.5 ~= 'solves more "
-    "often than not' and 0.9 ~= 'solves nearly every episode'.",
+    "1 - 0.9*steps/max_steps on success and 0 otherwise, and eval reports the mean over "
+    "episodes, so 0.5 ~= 'solves more often than not' and 0.9 ~= 'solves nearly every one'.",
 )
 parser.add_argument("--metric", choices=list(METRICS), default="iqm")
 parser.add_argument(
@@ -132,7 +133,6 @@ def sample_efficiency_curve(score_dict, eval_steps, metric="iqm", reps: int = 50
     fig.set_size_inches(7, 4.5)
     step_axis(plt.gca())
     plt.legend(fontsize=9)
-    # fig.tight_layout()
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -269,9 +269,9 @@ def per_env_curves(score_dict, eval_steps, tasks, metric="iqm", reps: int = 50_0
 def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=None):
     """Fraction of runs scoring above tau, swept across tau.
 
-    The dashed line marks `threshold`. `evaluate()` averages 10 episodes -- an eval
-    return of tau is therefore roughly "solved tau/0.95".
-    0.5 means "solves more often than not"; 0.9 means "solves nearly every episode".
+    The dashed line marks `threshold`. `evaluate()` returns the mean over eval episodes
+    and a solved episode pays a bit under 1, so tau ~= the fraction solved:
+    0.5 means "solves more often than not", 0.9 "solves nearly every episode".
     """
     final = {cond: scores[..., -1] for cond, scores in score_dict.items()}
     taus = np.linspace(0.0, 1.0, 101)
