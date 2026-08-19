@@ -1,0 +1,17 @@
+# @package _global_
+# DEHB search: ablation: does the LLM signal add anything beyond novelty?
+defaults:
+  - _base
+  - override /bonus: llm
+  - _self_
+
+hydra:
+  sweeper:
+    search_space:
+      hyperparameters:
+        llm.beta:
+          type: uniform_float
+          lower: 0.05
+          upper: 2.0
+          log: true
+          default_value: 0.5

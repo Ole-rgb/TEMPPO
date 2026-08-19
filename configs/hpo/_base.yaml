@@ -1,0 +1,66 @@
+# @package _global_
+# Shared skeleton for every DEHB search. Equal budget, seeds and objective are what make
+# the incumbents comparable, so they live here and cannot drift. A condition file adds
+# only its bonus group and its own coefficient(s).
+defaults:
+  - /config
+  - override /env: multiroom_n4s5
+  - override /hydra/sweeper: HyperDEHB
+  - override /hydra/launcher: joblib
+  - _self_
+
+objective: auc
+
+# Required, and equal to max_fidelity. total_timesteps is the fidelity here, so a
+# schedule following it would make a low rung a different algorithm rather than a prefix
+# of a full run.
+schedule_timesteps: 750_000
+
+llm:
+  # No-op without an LLM. A cache miss trains as if the bonus were zero and looks
+  # healthy in every log, so never let a search fetch plans mid-flight.
+  cache_only: true
+
+hydra:
+  sweeper:
+    n_trials: 60
+    budget_variable: total_timesteps
+    sweeper_kwargs:
+      # Search seeds, disjoint from the Makefile's reported and selection seeds.
+      # DEHB averages each trial over all of them.
+      seeds: [210, 231, 252, 273, 294]
+      max_parallelization: 0.2
+      optimizer_kwargs:
+        _target_: dehb.DEHB
+        _partial_: true
+        n_workers: 1
+        # PROVISIONAL: must sit past the condition's takeoff step, or every config ties
+        # at the lowest rung and promotion is a coin flip. eta=3 => 83k/250k/750k.
+        min_fidelity: 83_000
+        max_fidelity: ${schedule_timesteps}
+        output_path: ${hydra.sweep.dir}
+
+    # Tuned by every condition: a bonus moves the reward scale, hence the gradient scale
+    # that both of these act on. A condition file adds its own coefficients.
+    search_space:
+      hyperparameters:
+        learning_rate:
+          type: uniform_float
+          lower: 0.0001
+          upper: 0.003
+          log: true
+          default_value: 0.00025
+        ent_coef:
+          type: uniform_float
+          lower: 0.0001
+          upper: 0.03
+          log: true
+          default_value: 0.01
+
+  launcher:
+    n_jobs: 6
+
+  # Not multirun/: DEHB re-runs a promoted config at higher fidelity with the same seed,
+  # so search output repeats (condition, seed) pairs and check_unique_seeds rejects it.
+  sweep:
+    dir: ./hpo/${bonus.name}_${env.name}

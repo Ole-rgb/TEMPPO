@@ -1,2 +1,3 @@
 name: multiroom_n4s5
 gym_id: MiniGrid-MultiRoom-N4-S5-v1
+eval_interval: 10

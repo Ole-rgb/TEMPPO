@@ -1,0 +1,24 @@
+# @package _global_
+# DEHB search: beta_llm annealed to 0. The anneal horizon is not searched -- it defines
+# the condition, and below its own length every value looks like constant beta.
+defaults:
+  - _base
+  - override /bonus: rnd_llm_warmstart
+  - _self_
+
+hydra:
+  sweeper:
+    search_space:
+      hyperparameters:
+        rnd.beta:
+          type: uniform_float
+          lower: 0.00001
+          upper: 0.01
+          log: true
+          default_value: 0.001
+        llm.beta:
+          type: uniform_float
+          lower: 0.05
+          upper: 2.0
+          log: true
+          default_value: 0.5

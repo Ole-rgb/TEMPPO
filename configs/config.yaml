@@ -6,7 +6,7 @@ defaults:
 exp_name: ppo_minigrid
 seed: 0
 torch_deterministic: true
-cuda: true
+cuda: false
 capture_video: false
 
 # `env_id` is what the training script reads; the env group owns the actual value.
@@ -14,6 +14,8 @@ env_id: ${env.gym_id}
 
 # --- PPO ---------------------------------------------------------------------
 total_timesteps: 100000
+
+schedule_timesteps: null
 learning_rate: 2.5e-4
 num_envs: 4
 num_steps: 128
@@ -31,15 +33,20 @@ max_grad_norm: 0.5
 target_kl: null
 
 # --- Evaluation --------------------------------------------------------------
-eval_interval: 10      # run an eval every N policy-update iterations
-eval_episodes: 10
+# Owned by the env group: it follows max_steps, so any run of an env gets the
+# right value without remembering to pass one.
+eval_interval: ${env.eval_interval}
+eval_episodes: 20
+
+# What `main` returns to an HPO sweeper.
+objective: auc
 
 # --- Bonus internals ---------------------------------------------------------
 # Held FIXED across every condition. The bonus/ group flips ONLY the two
 # coefficients, so an ablation can never accidentally vary these as well.
 rnd:
   beta: 0.001
-  predictor_hidden_dim: 64
+  predictor_hidden_dim: 512
   predictor_lr: 1e-3
   embed_dim: 512
   normalize_intrinsic_reward: true
@@ -51,3 +58,5 @@ llm:
   cache_path: scripts/subgoal_cache_claude-opus-4-8.jsonl
   cache_only: false
   skip_go_to_goal: false
+  # Control arm: permute each bound plan, keeping the same subgoals and total bonus.
+  shuffle_plan: false

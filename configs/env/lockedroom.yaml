@@ -1,2 +1,5 @@
 name: lockedroom
 gym_id: MiniGrid-LockedRoom-v0
+# 50, not 10: max_steps=190 and a policy that never solves it runs every eval
+# episode to the cap, so evaluating on the default grid costs real time here.
+eval_interval: 50

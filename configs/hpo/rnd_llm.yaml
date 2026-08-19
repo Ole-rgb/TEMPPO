@@ -1,0 +1,24 @@
+# @package _global_
+# DEHB search: constant beta_llm. Both betas are searched, so this space is 4D against
+# the baseline's 3D at equal n_trials.
+defaults:
+  - _base
+  - override /bonus: rnd_llm
+  - _self_
+
+hydra:
+  sweeper:
+    search_space:
+      hyperparameters:
+        rnd.beta:
+          type: uniform_float
+          lower: 0.00001
+          upper: 0.01
+          log: true
+          default_value: 0.001
+        llm.beta:
+          type: uniform_float
+          lower: 0.05
+          upper: 2.0
+          log: true
+          default_value: 0.5
