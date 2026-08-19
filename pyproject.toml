@@ -7,16 +7,16 @@ name = "rl_final"
 version = "0.1.0"
 description = "TEMPPO: TEmplate-Matched Proposals for PPO"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
 authors = [{ name = "Ole Rößler" }]
 
 dependencies = [
     "torch",
     "gymnasium",
+    "numpy<2",
     "minigrid",
     "networkx",
-    "numpy",
     "pandas<3",
     "matplotlib",
     "moviepy",
@@ -38,7 +38,16 @@ dev = [
     "pytest>=7",
     "ruff",
     "pre-commit",
+    "cloudpickle",
 ]
+
+hpo = [
+    "hypersweeper[dehb]",
+    "hydra-joblib-launcher",
+]
+
+[project.scripts]
+rl-final-train = "rl_final.ppo.ppo_minigrid:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -51,6 +60,9 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B"]
 ignore = ["N806", "N803", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rl_final"]
 
 # --- Pytest -----------------------------------------------------------------
 
