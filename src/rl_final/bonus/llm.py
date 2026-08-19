@@ -3,18 +3,18 @@
 The shaped reward is folded into the extrinsic stream before GAE, exactly like RND:
     r_t = r_ext_t + beta_llm * r_subgoal_t
 
-An LLM is shown the full map **class plan** once and returns an ordered list of subgoals
-("pick up the yellow key", "open the yellow door", "go to the goal"). During
-training the agent collects `subgoal_bonus` the first time it satisfies the next
-outstanding subgoal in that list. No API call ever happens inside the training loop.
+An LLM is shown the full rendered map once and returns an ordered list of subgoals
+("pick up the yellow key", "open the yellow door", "go to the goal"). During training the
+agent collects `subgoal_bonus` the first time it satisfies the next outstanding subgoal in
+that list. No API call ever happens inside the training loop.
 
 WHY A PLAN CLASS AND NOT A MAP HASH
-MiniGrid regenerates the layout every episode, so hashing the rendered map means one cache
-miss per episode -- ~12.5k per MultiRoom run, ~225k across a sweep. `plan_key` instead
-canonicalises the map under two transformations that cannot change the plan: room-graph and
-colour permutation. Both are SYMMETRIES of the environment, and solely used for environment
-caching --  the LLM only receives the full rendered map. Measured over 6k episodes; the fraction
-of later episodes whose class was already seen (see `audit_env`):
+MiniGrid regenerates the layout every episode, so hashing the rendered map would miss the
+cache once per episode. `plan_key` instead canonicalises the map under two transformations
+that cannot change the plan -- room-graph and colour permutation -- both symmetries of the
+environment. Canonicalisation is for caching only; the LLM still sees the full map. Over
+6k episodes, with coverage = the fraction of later episodes whose class was already seen
+(see `audit_env`):
 
     env                     plan classes   coverage   ms/key
     DoorKey-5x5/8x8/16x16              1       100%      0.2
@@ -156,7 +156,7 @@ def room_graph(base) -> nx.Graph:
                 graph.add_node(stub, objs=(), agent=False)
                 graph.add_edge(sides[0], stub, color=obj.color, locked=bool(obj.is_locked))
 
-    # Keeping everything with no doors and no obstacles out (empty space around and dead rooms)
+    # Drop anything unreachable from the agent: outer margin and sealed-off rooms.
     if agent_room is not None:
         graph = graph.subgraph(nx.node_connected_component(graph, agent_room)).copy()
 
@@ -228,10 +228,6 @@ def plan_key_and_roles(base) -> tuple[str, dict]:
     still gets the full rendered map and has to work that out. Two layouts sharing a key
     are structurally the same problem, which is what makes the cache finite -- run
     `audit_env` to check the space actually closes before paying for it.
-
-    Note: Conceptually an env containing grey-yellow-grey and red-blue-red are alike, so
-    we can avoid dublicates by changing to color1-color2-color1 (which is identical for both)
-    See `subgoals_to_roles` / `subgoals_from_roles`.
     """
     graph = room_graph(base)
     roles = _colour_roles(base, graph)
@@ -247,23 +243,20 @@ def plan_key(base) -> str:
 def audit_env(env_id: str, episodes: int = 10_000, budget: int = 500) -> dict:
     """Is this env cacheable? Run BEFORE spending API budget on a new environment.
 
-    One failure mode now that ordering is never asserted: the plan classes keep growing,
-    so the cache is unbounded. That happens when the layout's ROOM TOPOLOGY is redrawn
-    each episode rather than just its colours -- KeyCorridor changes how many doors join
-    which rooms every reset, so a faithful key cannot collapse it.
+    The failure mode is an unbounded cache: plan classes keep appearing, so no amount of
+    warming closes the space. It happens when ROOM TOPOLOGY is redrawn every episode
+    rather than just the colours -- KeyCorridor rewires which rooms share a door on every
+    reset, so no faithful key can collapse it.
 
-    `coverage` is the number that predicts training directly: buy plans for every class
-    seen in the first half, then measure the fraction of SECOND-half episodes that hit one.
-    That is the fraction of episodes which would actually receive their subgoal bonus, and
-    it separates a slow converging tail from real divergence far better than asking
-    whether any new class appeared at all:
+    `coverage` is the number that predicts training, and it matters more than the raw
+    class count, which keeps creeping up with the episode budget on every env. Buy plans
+    for every class in the first half, then measure the fraction of SECOND-half episodes
+    that hit one -- that is the fraction that would actually receive their subgoal bonus.
+    At 20k episodes MultiRoom-N4-S5 shows 18 classes at coverage ~1.00 (fine) against
+    KeyCorridorS3R3's 14,706 at ~0.45 (unusable).
 
-        MultiRoom-N4-S5-v1   18 classes at 20k episodes, coverage ~1.00   fine
-        MultiRoom-N6        205 classes at 20k episodes, coverage ~0.99   fine
-        KeyCorridorS3R3  14,706 classes at 20k episodes, coverage ~0.45   unusable
-
-    A miss is never fatal -- `SubgoalTracker` just pays no bonus that episode and counts
-    it -- so `coverage` is a quality number, not a correctness one.
+    A miss is never fatal -- `SubgoalTracker` pays no bonus that episode and counts it --
+    so `coverage` is a quality number, not a correctness one.
     """
     # Local: training never needs this helper. `minigrid` is what registers the env ids.
     import gymnasium as gym
@@ -500,12 +493,16 @@ class SubgoalTracker:
         subgoal_bonus: float,
         planner=None,
         skip_go_to_goal: bool = True,
+        shuffle_plan: bool = False,
+        seed: int = 0,
     ):
         self.bases = [e.unwrapped for e in envs.unwrapped.envs]
         self.cache = cache
         self.subgoal_bonus = float(subgoal_bonus)
         self.planner = planner  # called on a miss; None = cache-only
         self.skip_go_to_goal = bool(skip_go_to_goal)
+        self.shuffle_plan = bool(shuffle_plan)
+        self.rng = np.random.default_rng(seed) if self.shuffle_plan else None
         self.num_envs = len(self.bases)
 
         self.plans: list[list[Subgoal]] = [[] for _ in range(self.num_envs)]
@@ -518,8 +515,6 @@ class SubgoalTracker:
         self.fetched = 0  # plan classes bought from the LLM during this run
         self.completed = 0  # subgoals credited, across all envs
 
-        # `grid` exists from __init__ but is EMPTY until reset, so keying an unreset env
-        # yields a degenerate key that misses every time. `agent_pos` is the honest test.
         if any(b.agent_pos is None for b in self.bases):
             raise RuntimeError(
                 "SubgoalTracker needs a generated layout, so build it AFTER envs.reset() "
@@ -536,7 +531,8 @@ class SubgoalTracker:
         plan = self.cache.get(key, roles)
 
         if plan is None and self.planner is not None:
-            # Warm the cache in place. Do this ONCE single-process before a parallel
+            # Warm the cache in place. Do this ONCE, single-process: parallel jobs
+            # would each buy a plan for the same class and train against different ones.
             try:
                 fetched = self.planner(base)
                 self.cache.add(key, base.mission, render_map(base), fetched, roles)
@@ -548,8 +544,11 @@ class SubgoalTracker:
         if plan is None:
             self.misses += 1
             plan = []
-        elif self.skip_go_to_goal:
-            plan = [s for s in plan if s.action != "go_to_goal"]
+        else:
+            if self.skip_go_to_goal:
+                plan = [s for s in plan if s.action != "go_to_goal"]
+            if self.shuffle_plan:
+                plan = [plan[k] for k in self.rng.permutation(len(plan))]
         self.plans[i] = plan
         self.idx[i] = 0
         self._credited_doors[i].clear()
@@ -558,8 +557,8 @@ class SubgoalTracker:
         base = self.bases[i]
 
         if sg.action == "go_to_goal":
-            # TODO might just be inflating extr. reward
-            # MiniGrid terminates on the goal (and on lava, which these envs lack).
+            # MiniGrid terminates on the goal (these envs have no lava), so
+            # it scales the terminal reward rather than adding exploration signal
             return terminated
 
         if sg.action == "pick_up":
@@ -630,6 +629,39 @@ def anneal_factor(global_step: int, anneal_steps: int) -> float:
     return max(0.0, 1.0 - global_step / anneal_steps)
 
 
+def schedule_horizon(cfg) -> int:
+    """Env steps that time-varying schedules resolve against.
+
+    `total_timesteps` normally, but a multi-fidelity search drives THAT as the
+    fidelity -- so `schedule_timesteps` pins the horizon independently and keeps a
+    low-fidelity run an exact prefix of a full one.
+    """
+    return int(cfg.get("schedule_timesteps") or cfg.total_timesteps)
+
+
+def resolve_anneal_steps(cfg) -> int:
+    """beta_llm's anneal horizon in env steps, from whichever form was given.
+
+    `anneal_llm_frac` is the portable form: 0.2 means "anneal off over the first 20%
+    of the schedule", which carries across environments and budgets in a way a hard
+    step count does not. It resolves against `schedule_horizon`, not `total_timesteps`,
+    so it stays fidelity-invariant. `anneal_llm_steps` is the literal form.
+    """
+    bonus = cfg.get("bonus") or {}
+    steps = int(bonus.get("anneal_llm_steps", 0) or 0)
+    frac = bonus.get("anneal_llm_frac", None)
+    if frac is None:
+        return steps
+    if steps:
+        raise ValueError(
+            "set bonus.anneal_llm_frac OR bonus.anneal_llm_steps, not both "
+            f"(got frac={frac}, steps={steps})"
+        )
+    if not 0.0 <= float(frac) <= 1.0:
+        raise ValueError(f"bonus.anneal_llm_frac must be in [0, 1], got {frac}")
+    return int(round(float(frac) * schedule_horizon(cfg)))
+
+
 class LLMBonus:
     """Top-level handle, mirroring `RND`'s role in the training loop.
 
@@ -651,6 +683,8 @@ class LLMBonus:
             cfg.llm.subgoal_bonus,
             planner,
             skip_go_to_goal=cfg.llm.skip_go_to_goal,
+            shuffle_plan=bool(cfg.llm.get("shuffle_plan", False)),
+            seed=int(cfg.get("seed", 0)),
         )
 
     def step(self, dones, terminateds) -> np.ndarray:

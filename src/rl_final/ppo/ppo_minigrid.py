@@ -1,22 +1,24 @@
 """
 ppo_minigrid.py
 
-Adapted from CleanRL's ppo_atari.py:
+Structure adapted from CleanRL's ppo_atari.py:
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_atari.py
-
 Original license: MIT (see LICENSE file).
 Modifications: replaced Atari CNN with MiniGrid encoder;
 added exploration bonuses (RND, llm-subgoals).
+
+The hyperparameters in configs/config.yaml are ppo.py's defaults (CartPole-v1), not
+ppo_atari.py's, which uses num_envs=8 and clip_coef=0.1. Neither is MiniGrid-tuned.
 """
 
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 import csv
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# from dataclasses import dataclass
 import gymnasium as gym
 import hydra
 import numpy as np
@@ -26,12 +28,10 @@ import torch.optim as optim
 from hydra.core.hydra_config import HydraConfig
 from minigrid.wrappers import ImgObsWrapper
 from omegaconf import DictConfig, OmegaConf
-
-# import tyro
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from rl_final.bonus.llm import LLMBonus, anneal_factor
+from rl_final.bonus.llm import LLMBonus, anneal_factor, resolve_anneal_steps, schedule_horizon
 from rl_final.bonus.rnd import RND
 
 
@@ -367,13 +367,40 @@ def evaluate(agent, env_id, num_episodes, device, video_dir=None):
     return float(np.mean(returns))
 
 
-@hydra.main(config_path="../../../configs", config_name="config", version_base=None)
-def main(cfg: DictConfig) -> None:
+WORST_OBJECTIVE = 1e6  # handed to the optimizer when a run produced nothing usable
+
+
+def hpo_objective(eval_returns, mode="auc"):
+    """The scalar an HPO sweeper minimizes.
+
+    `auc`   mean eval return across the whole run.
+    `final` mean of the last 10 evals.
+
+    Reported results always come from eval_rewards.csv; this only steers search.
+    """
+    if not eval_returns:
+        return WORST_OBJECTIVE
+    if mode == "auc":
+        score = float(np.mean(eval_returns))
+    elif mode == "final":
+        score = float(np.mean(eval_returns[-10:]))
+    else:
+        raise ValueError(f"unknown objective {mode!r}, expected 'auc' or 'final'")
+    # NaN would poison DEHB's surrogate model rather than just scoring badly.
+    return WORST_OBJECTIVE if np.isnan(score) else -score
+
+
+_CONFIG_DIR = str(Path(__file__).resolve().parents[3] / "configs")
+
+
+def main(cfg: DictConfig) -> float:
     OmegaConf.set_struct(cfg, False)
     args = cfg
+    args.total_timesteps = int(args.total_timesteps)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    args.num_iterations = args.total_timesteps // args.batch_size
+    args.num_iterations = int(args.total_timesteps // args.batch_size)
+    args.schedule_iterations = max(1, int(schedule_horizon(args) // args.batch_size))
 
     run_dir = Path(HydraConfig.get().runtime.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -417,7 +444,7 @@ def main(cfg: DictConfig) -> None:
     beta_rnd = float(cfg.bonus.beta_rnd)
     beta_llm = float(cfg.bonus.beta_llm)
     # Warm start: 0 (the default for every non-annealed condition) holds beta_llm flat.
-    anneal_llm_steps = int(cfg.bonus.get("anneal_llm_steps", 0))
+    anneal_llm_steps = resolve_anneal_steps(cfg)
     rnd = None
     if beta_rnd > 0:
         # Built after seeding, so each seed gets its own reproducible random target.
@@ -425,15 +452,44 @@ def main(cfg: DictConfig) -> None:
 
     eval_file = open(run_dir / "eval_rewards.csv", "w", newline="")
     eval_csv = csv.writer(eval_file)
-    eval_csv.writerow(["eval_steps", "eval_rewards"])
+    eval_csv.writerow(
+        [
+            "eval_steps",
+            "eval_rewards",
+            "subgoals_completed",
+            "entropy",
+            "value_loss",
+            "episodic_length",
+            "beta_llm",
+        ]
+    )
+
+    eval_returns = []  # same values as the csv, kept in memory for hpo_objective
+    metrics: dict = {}  # last update's losses; rebound every iteration
+    ep_lengths: list = []  # episode lengths since the last eval, averaged then cleared
+    beta_llm_now = beta_llm  # held flat unless a warm start anneals it
 
     def run_eval():
         # One mp4 per eval, in a step-named folder, so you can watch the policy
         video_dir = run_dir / "videos" / f"step_{global_step:08d}" if args.capture_video else None
         mean_return = evaluate(agent, args.env_id, args.eval_episodes, device, video_dir)
-        eval_csv.writerow([global_step, mean_return])
+        completed = llm.stats["llm/subgoals_completed"] if llm is not None else 0
+        ep_len = float(np.mean(ep_lengths)) if ep_lengths else float("nan")
+        ep_lengths.clear()
+        eval_csv.writerow(
+            [
+                global_step,
+                mean_return,
+                completed,
+                metrics.get("losses/entropy", float("nan")),
+                metrics.get("losses/value_loss", float("nan")),
+                ep_len,
+                beta_llm_now,
+            ]
+        )
         eval_file.flush()
         writer.add_scalar("charts/eval_return", mean_return, global_step)
+        eval_returns.append(mean_return)
         return mean_return
 
     # ALGO Logic: Storage setup
@@ -452,7 +508,8 @@ def main(cfg: DictConfig) -> None:
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
+            # max(0.0, ...) only bites if the horizon is pinned shorter than the run.
+            frac = max(0.0, 1.0 - (iteration - 1.0) / args.schedule_iterations)
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
@@ -462,6 +519,7 @@ def main(cfg: DictConfig) -> None:
         for gs, ep_return, ep_length in episode_stats:
             writer.add_scalar("charts/episodic_return", ep_return, gs)
             writer.add_scalar("charts/episodic_length", ep_length, gs)
+            ep_lengths.append(ep_length)
 
         rewards = buf.rewards
         if rnd is not None:
@@ -541,6 +599,21 @@ def main(cfg: DictConfig) -> None:
     envs.close()
     writer.close()
 
+    # HPO sweepers read this return value; `make run-*` and single runs ignore it.
+    objective = hpo_objective(eval_returns, args.objective)
+    print(f"objective[{args.objective}]={objective:.4f}  ({len(eval_returns)} evals)")
+    return objective
+
+
+# Call this, never main, from a shell.
+cli = hydra.main(config_path=_CONFIG_DIR, config_name="config", version_base=None)(main)
+
 
 if __name__ == "__main__":
-    main()
+    if "--multirun" in sys.argv or "-m" in sys.argv:
+        print(
+            "WARNING: launch sweeps with `python -m rl_final.ppo` -- running "
+            "ppo_minigrid directly breaks parallel launchers (see __main__.py).",
+            file=sys.stderr,
+        )
+    cli()
