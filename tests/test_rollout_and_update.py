@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import gymnasium as gym
 import pytest
 import torch
+
 from rl_final.ppo.ppo_minigrid import Agent, Rollout, collect_rollout, make_env, ppo_update
 
 NUM_STEPS, NUM_ENVS = 32, 4

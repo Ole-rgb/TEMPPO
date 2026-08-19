@@ -2,6 +2,7 @@ import gymnasium as gym
 import pytest
 import torch
 from minigrid.wrappers import ImgObsWrapper
+
 from rl_final.ppo.ppo_minigrid import Agent
 
 

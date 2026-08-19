@@ -14,10 +14,22 @@ pytestmark = pytest.mark.slow
 BASE = [
     sys.executable,
     "-m",
-    "rl_final.ppo.ppo_minigrid",
+    "rl_final.ppo",  # the documented entrypoint, not ppo_minigrid -- see __main__.py
     "env=empty_5x5",
     "bonus=none",
     "eval_interval=5",
+]
+
+# The schema the analysis pipeline reads. Widening it is fine; reordering or dropping a
+# column is not, because a finished run's csv cannot be regenerated without retraining.
+EVAL_CSV_COLUMNS = [
+    "eval_steps",
+    "eval_rewards",
+    "subgoals_completed",
+    "entropy",
+    "value_loss",
+    "episodic_length",
+    "beta_llm",
 ]
 
 
@@ -29,7 +41,7 @@ def train(tmp_path, steps=8000, seed=0, extra=()):
         capture_output=True,
         text=True,
     )
-    return out / f"seed_{seed}"
+    return out
 
 
 def read_csv(run_dir):
@@ -42,13 +54,13 @@ def test_run_writes_every_artifact_the_analysis_needs(tmp_path):
     assert (run_dir / "eval_rewards.csv").exists()
     assert (run_dir / "agent.pt").exists()
     assert list(run_dir.glob("events.out.tfevents.*")), "no TensorBoard events"
-    assert (run_dir.parent / ".hydra" / "config.yaml").exists(), "no resolved config dump"
+    assert (run_dir / ".hydra" / "config.yaml").exists(), "no resolved config dump"
 
 
 def test_eval_csv_has_the_documented_schema(tmp_path):
     rows = read_csv(train(tmp_path))
     assert rows, "csv has no data rows"
-    assert list(rows[0]) == ["eval_steps", "eval_rewards"]
+    assert list(rows[0]) == EVAL_CSV_COLUMNS
     steps = [int(r["eval_steps"]) for r in rows]
     assert steps == sorted(steps), "eval_steps must be monotonically increasing"
 
