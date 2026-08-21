@@ -189,10 +189,11 @@ FIGURES ?= figures/$(notdir $(patsubst %/,%,$(SWEEPS)))/$(subst $(comma),-,$(ENV
 # P(X > Y) needs a reference
 BASELINE ?=
 
-# The return counted as "solved" in the performance profile. 0.5 suits MultiRoom and
-# DoorKey, where the solving arms sit near their ceiling. On LockedRoom every condition
-# is below it, so the profile reads flat zero and shows nothing -- pass a lower value.
-THRESHOLD ?= 0.5
+# The return counted as "solved" in the performance profile.
+THRESH_multiroom_n4s5 ?= 0.70
+THRESH_doorkey_8x8    ?= 0.80
+THRESH_lockedroom     ?= 0.25
+THRESHOLD ?= $(or $(THRESH_$(ENV)),0.5)
 
 plots:                       ## rliable figures for ENV, into figures/<sweep>/<env>/
 	$(PYTHON) -m $(PKG).analysis.plots --run-dir $(SWEEPS) \
