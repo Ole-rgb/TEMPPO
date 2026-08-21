@@ -25,6 +25,7 @@ dependencies = [
     "rliable",
     "arch==7.2.0",
     "tensorboard",
+    "setuptools<81",
     "ollama",
     "anthropic",
     "dotenv",

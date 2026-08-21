@@ -6,9 +6,9 @@ SWEEPS := multirun
 
 .PHONY: help install format check pre-commit test sanity audit warm-cache \
         run-ppo run-rnd run-llm run-rnd-llm run-warmstart run-shuffled run-entcoef \
-        run-lockedroom sensitivity conditions \
-        sweep-beta-llm sweep-beta-rnd \
-        plots tensorboard reproduce hpo hpo-incumbents clean
+        run-lockedroom run-shuffled-llm run-doorkey sensitivity conditions \
+        sweep-beta-llm sweep-beta-rnd sweep-beta-grid \
+        plots plots-sensitivity tensorboard reproduce hpo hpo-incumbents clean
 
 # --- Experimental constants ---------------------------------------------------
 ENV       ?= multiroom_n4s5
@@ -107,24 +107,19 @@ run-warmstart:               ## beta_llm annealed to 0 over the first fraction o
 
 
 # --- Controls ------------------------------------------------------------------
-# Same subgoals and same total bonus, order permuted: separates whether the LLM picked
-# the right targets from whether it sequenced them usefully.
-run-shuffled:                ## CONTROL: plan order permuted
-	$(call sweep,rnd_llm_shuffled,bonus=rnd_llm llm.shuffle_plan=true)
+# Same subgoals, same plan, order permuted
+run-shuffled-llm:            ## CONTROL: plan order permuted
+	$(call sweep,llm_shuffled,bonus=llm llm.shuffle_plan=true)
 
-# Add-on, not in $(CONDITIONS) -- see HANDOFF.md. Run it only IF PPO+RND+LLM plateaus
-# below PPO+RND, to separate the two explanations: shaping shrinking the normalized
-# advantage at a fixed ent_coef, or the shaped MDP having a different optimum. Lowering
-# ent_coef undoes only the first. The value assumes beta_llm=0.5; rescale if it moves.
-run-entcoef:                 ## add-on, not in the study: scale-matched ent_coef
-	$(call sweep,rnd_llm_ent003,bonus=rnd_llm ent_coef=0.003)
+# Second environment, for a generalisation claim
+run-doorkey:                 ## generalisation: full condition set on DoorKey-8x8
+	$(MAKE) conditions ENV=doorkey_8x8
 
-# LockedRoom: the scoped negative, at 6.7x the MultiRoom budget so a null bounds the
-# method rather than merely under-running it. Returns may well stay 0 throughout -- then
-# the reportable signal is subgoals_completed and policy entropy, not return.
+# LockedRoom for a longer run
 LOCKED_SEEDS ?= 0 21 42 63 84
 
-run-lockedroom:              ## scoped negative: LockedRoom, 5M steps, 3 conditions
+## scoped negative: LockedRoom, 5M steps, 3 conditions
+run-lockedroom:
 	$(MAKE) run-rnd run-rnd-llm run-warmstart ENV=lockedroom \
 	  TIMESTEPS=5_000_000 SEEDS="$(LOCKED_SEEDS)"
 
@@ -151,37 +146,91 @@ define betasweep
 	@echo "  done -> $(SENS_SWEEPS)/$(1)/$(ENV)/"
 endef
 
-sweep-beta-llm:              ## sensitivity of beta_llm
-	$(call betasweep,sens_beta_llm,$(BETA_LLM),llm.beta,bonus=rnd_llm)
-
-sweep-beta-rnd:              ## sensitivity of beta_rnd
+# SELECTION sweeps: each coefficient is chosen on the SIMPLEST condition that contains
+# it, then transplanted. Both baselines therefore get their own best value and the
+# proposed method inherits both unoptimised -- the conservative direction.
+sweep-beta-rnd:              ## SELECTION: beta_rnd on PPO+RND
 	$(call betasweep,sens_beta_rnd,$(BETA_RND),rnd.beta,bonus=rnd)
+
+sweep-beta-llm:              ## SELECTION: beta_llm on PPO+LLM
+	$(call betasweep,sens_beta_llm,$(BETA_LLM),llm.beta,bonus=llm)
+
+# --- Interaction: the combined sweep -------------------------------------------
+BETA_GRID ?= 0.0001:0.125 0.0001:1.0 0.01:0.125 0.01:1.0 0.001:0.5
+
+define pairsweep
+	@mkdir -p logs
+	@echo "  $(1): $(words $(2)) (beta_rnd,beta_llm) pairs x $(words $(SWEEP_SEEDS)) seeds, $(JOBS) at a time"
+	@for p in $(2); do for s in $(SWEEP_SEEDS); do echo "$$p $$s" | tr ':' ' '; done; done | \
+	  xargs -P $(JOBS) -n3 sh -c \
+	    'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 $(TRAIN) --multirun \
+	       hydra.sweep.dir=$(SENS_SWEEPS)/$(1)/$(ENV)/r$$1-l$$2-seed$$3 \
+	       env=$(ENV) total_timesteps=$(TIMESTEPS) seed=$$3 \
+	       rnd.beta=$$1 llm.beta=$$2 $(PIN) bonus=rnd_llm \
+	       > logs/$(1)-$(ENV)-r$$1-l$$2-seed$$3.log 2>&1' sh
+	@echo "  done -> $(SENS_SWEEPS)/$(1)/$(ENV)/"
+endef
+
+sweep-beta-grid:             ## INTERACTION: (beta_rnd, beta_llm) pairs, corners + centre
+	$(call pairsweep,sens_beta_grid,$(BETA_GRID))
 
 
 # --- Analysis -----------------------------------------------------------------
 
 # Reads every sweep under $(SWEEPS)/ and plots the graphs.
-plots:                       ## rliable figures for ENV, from the sweep dir
-	$(PYTHON) -m $(PKG).analysis.plots --run-dir $(SWEEPS) \
-	  --env $(PLOT_ENVS) --reps 10_000
 
-tensorboard:                 ## browse the runs
-	tensorboard --logdir $(SWEEPS)
+# Stratified-bootstrap resamples.
+REPS ?= 50_000
+
+# Sweep AND env: multirun/ holds two envs, multirun_sens/ three sweeps, so either
+# component alone lets one `make plots` overwrite another.
+FIGURES ?= figures/$(notdir $(patsubst %/,%,$(SWEEPS)))/$(subst $(comma),-,$(ENV))
+
+# P(X > Y) needs a reference
+BASELINE ?=
+
+# The return counted as "solved" in the performance profile. 0.5 suits MultiRoom and
+# DoorKey, where the solving arms sit near their ceiling. On LockedRoom every condition
+# is below it, so the profile reads flat zero and shows nothing -- pass a lower value.
+THRESHOLD ?= 0.5
+
+plots:                       ## rliable figures for ENV, into figures/<sweep>/<env>/
+	$(PYTHON) -m $(PKG).analysis.plots --run-dir $(SWEEPS) \
+	  --env $(PLOT_ENVS) --reps $(REPS) --out-dir $(FIGURES) \
+	  --success-threshold $(THRESHOLD) \
+	  $(if $(BASELINE),--baseline "$(BASELINE)")
+
+# The reference each P(X > Y) panel is drawn against.
+BASE_RND  ?= PPO+RND (β_rnd=0.001)
+BASE_LLM  ?= PPO+LLM (β_llm=0.5)
+BASE_GRID ?= PPO+RND+LLM (β_rnd=0.001, β_llm=0.5)
+
+## phase 1 figures: all three sweeps, one dir each
+plots-sensitivity:
+	$(MAKE) plots SWEEPS=$(SENS_SWEEPS)/sens_beta_rnd  BASELINE="$(BASE_RND)"
+	$(MAKE) plots SWEEPS=$(SENS_SWEEPS)/sens_beta_llm  BASELINE="$(BASE_LLM)"
+	$(MAKE) plots SWEEPS=$(SENS_SWEEPS)/sens_beta_grid BASELINE="$(BASE_GRID)"
+
+## browse the runs (both sweep roots)
+tensorboard:
+	tensorboard --logdir_spec main:$(SWEEPS),sens:$(SENS_SWEEPS)
 
 # --- Full study ---------------------------------------------------------------
-# Phase 1 picks the coefficients; set them in configs/config.yaml, then run phase 2,
-# which produces the reported numbers.
-SENSITIVITY := sweep-beta-llm sweep-beta-rnd
-CONDITIONS  := run-ppo run-rnd run-llm run-rnd-llm run-warmstart run-shuffled
+# Phase 1. The first two pick the coefficients -- set them in configs/config.yaml before
+# running phase 2.
+SENSITIVITY := sweep-beta-rnd sweep-beta-llm sweep-beta-grid
+CONDITIONS  := run-ppo run-rnd run-llm run-rnd-llm run-warmstart run-shuffled-llm
 
 sensitivity: $(SENSITIVITY)  ## phase 1: beta sweeps on the selection seeds
-conditions: $(CONDITIONS)    ## phase 2: every condition + both controls, at the chosen betas
+conditions: $(CONDITIONS)    ## phase 2: five conditions + the shuffled control, at the chosen betas
 
 # Re-runs a study whose betas are already committed, so the two phases can go back to
 # back. LockedRoom is plotted on its own -- its return ceiling differs, so pooling it
 # with MultiRoom would be meaningless.
-reproduce: sensitivity conditions run-lockedroom  ## all three phases, then figures (~8h)
+reproduce: sensitivity conditions run-doorkey run-lockedroom  ## the whole study (~13h)
+	$(MAKE) plots-sensitivity
 	$(MAKE) plots
+	$(MAKE) plots ENV=doorkey_8x8
 	$(MAKE) plots ENV=lockedroom
 
 # --- Cleanup -------------------------------------------------------------------
@@ -189,6 +238,17 @@ clean:                       ## drop __pycache__, .pytest_cache and .ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type d -name .pytest_cache -exec rm -rf {} +
 	find . -type d -name .ruff_cache -exec rm -rf {} +
+
+
+# --- Add-ons (not in $(CONDITIONS); run only if the study raises the question) ---
+
+# The same ordering control on the combined arm.
+# Redundant while PPO+RND+LLM matches PPO+LLM.
+run-shuffled:                ## add-on: plan order permuted, with RND
+	$(call sweep,rnd_llm_shuffled,bonus=rnd_llm llm.shuffle_plan=true)
+
+run-entcoef:                 ## add-on: scale-matched ent_coef
+	$(call sweep,rnd_llm_ent003,bonus=rnd_llm ent_coef=0.003)
 
 
 # --- HPO (optional; not part of the study) --------------------------------------

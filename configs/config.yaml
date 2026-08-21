@@ -52,7 +52,7 @@ rnd:
   normalize_intrinsic_reward: true
 
 llm:
-  beta: 0.5
+  beta: 0.25
   subgoal_bonus: 1.0
   model: claude-opus-4-8
   cache_path: scripts/subgoal_cache_claude-opus-4-8.jsonl

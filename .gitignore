@@ -12,3 +12,5 @@ runs/
 figures/
 .env
 logs/
+multirun_sens/
+multirun/
