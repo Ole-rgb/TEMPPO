@@ -162,15 +162,23 @@ which is why the budget is 6.7x the MultiRoom one.
 make plots-sensitivity
 make plots
 make plots ENV=doorkey_8x8
-make plots ENV=lockedroom THRESHOLD=0.25 BASELINE="PPO+RND (β_rnd=0.001)"
+make plots ENV=lockedroom
 ```
 
 Figures land in `figures/<sweep>/<env>/`, one directory per (sweep, environment) pair, so
 nothing overwrites anything.
 
-`THRESHOLD` is the return counted as "solved" in the performance profile. The 0.5 default
-suits MultiRoom and DoorKey; on LockedRoom every condition sits below it, so pass 0.25 or
-the profile reads flat zero.
+`THRESHOLD` is the return counted as "solved" in the performance profile, and scales with
+what each env can reach: 0.70 MultiRoom, 0.80 DoorKey, 0.25 LockedRoom (nothing there gets
+near its ceiling). The Makefile picks it per env -- override only to test sensitivity.
+
+`REPS` (default 10,000) is the bootstrap resample count. It does not narrow the intervals --
+seed count sets their width -- so raising it only stabilises the printed endpoints, at about
+50 min per curve figure at 50k. Use `REPS=2000` while iterating.
+
+`BASELINE` is the reference each `P(X > Y)` panel is drawn against; the Makefile sets it
+per env. Only LockedRoom needs one -- it has no PPO arm, so the fallback would pick
+alphabetically rather than the arm that actually works there.
 
 Never pool environments in one figure: return ceilings differ (MultiRoom ~0.78, DoorKey
 ~0.97), so a pooled aggregate tracks the easier task and hides that a bonus can help on one
