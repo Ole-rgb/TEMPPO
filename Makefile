@@ -180,14 +180,17 @@ sweep-beta-grid:             ## INTERACTION: (beta_rnd, beta_llm) pairs, corners
 # Reads every sweep under $(SWEEPS)/ and plots the graphs.
 
 # Stratified-bootstrap resamples.
-REPS ?= 50_000
+REPS ?= 10_000
 
 # Sweep AND env: multirun/ holds two envs, multirun_sens/ three sweeps, so either
 # component alone lets one `make plots` overwrite another.
 FIGURES ?= figures/$(notdir $(patsubst %/,%,$(SWEEPS)))/$(subst $(comma),-,$(ENV))
 
 # P(X > Y) needs a reference
-BASELINE ?=
+# Must be the label AFTER simplify_labels drops the pinned coefficients -- on
+# LockedRoom every arm shares beta_rnd, so the plotted name is the bare one.
+BASE_lockedroom ?= PPO+RND
+BASELINE ?= $(BASE_$(ENV))
 
 # The return counted as "solved" in the performance profile.
 THRESH_multiroom_n4s5 ?= 0.70
