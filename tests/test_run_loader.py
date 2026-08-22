@@ -295,8 +295,8 @@ def test_anneal_horizon_is_part_of_the_condition_label():
         cfg.bonus.anneal_llm_steps = horizon
         labels.add(condition_label(cfg))
     assert labels == {
-        "PPO+RND+LLM(warm) (β_rnd=0.001, β_llm=0.5→0@150k)",
-        "PPO+RND+LLM(warm) (β_rnd=0.001, β_llm=0.5→0@300k)",
+        "PPO+RND+LLM (warm) (β_rnd=0.001, β_llm=0.5→0@150k)",
+        "PPO+RND+LLM (warm) (β_rnd=0.001, β_llm=0.5→0@300k)",
     }
 
 
@@ -405,3 +405,35 @@ def test_pinned_lr_horizon_is_a_distinct_condition():
     b.schedule_timesteps = int(b.total_timesteps) * 4
     assert condition_label(a) != condition_label(b)
     assert condition_label(a) == condition_label(cfg_for("rnd_llm", 0.5))
+
+
+# --- simplify_labels: a base name may carry its own bracket ---------------------
+
+
+def test_coefficients_are_dropped_only_when_labels_stay_distinct():
+    """Phase 2 pins both betas, so they are noise; a beta sweep needs them to tell
+    its curves apart. The rule is the same either way -- drop what stays unique."""
+    import sys
+
+    sys.argv = ["x", "--run-dir", "."]
+    from rl_final.analysis.plots import simplify_labels
+
+    phase2 = simplify_labels(
+        [
+            "PPO",
+            "PPO+RND (β_rnd=0.001)",
+            "PPO+LLM (β_llm=0.25)",
+            "PPO+LLM (β_llm=0.25, shuffled)",
+            "PPO+RND+LLM (β_rnd=0.001, β_llm=0.25)",
+            "PPO+RND+LLM (warm) (β_rnd=0.001, β_llm=0.25→0@262.5k)",
+        ]
+    )
+    # the bracket belonging to the NAME survives; only coefficients go
+    assert phase2["PPO+RND+LLM (warm) (β_rnd=0.001, β_llm=0.25→0@262.5k)"] == ("PPO+RND+LLM (warm)")
+    assert phase2["PPO+LLM (β_llm=0.25, shuffled)"] == "PPO+LLM (shuffled)"
+    assert phase2["PPO+RND (β_rnd=0.001)"] == "PPO+RND"
+    assert len(set(phase2.values())) == len(phase2)
+
+    # a sweep varies its coefficient, so dropping it would collide -- it must stay
+    sweep = [f"PPO+RND (β_rnd={b})" for b in ("0.0001", "0.001", "0.01")]
+    assert simplify_labels(sweep) == dict(zip(sweep, sweep, strict=True))

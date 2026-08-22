@@ -22,7 +22,7 @@ BONUS_NAMES = {
     "rnd": "PPO+RND",
     "llm": "PPO+LLM",
     "rnd_llm": "PPO+RND+LLM",
-    "rnd_llm_warmstart": "PPO+RND+LLM(warm)",
+    "rnd_llm_warmstart": "PPO+RND+LLM (warm)",
 }
 # KEEP IN SYNC WITH configs/config.yaml -- test_run_loader asserts they match.
 TUNABLE_DEFAULTS = {

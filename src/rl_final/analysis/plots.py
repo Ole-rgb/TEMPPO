@@ -20,6 +20,31 @@ from rliable import metrics, plot_utils
 
 from rl_final.analysis.run_loader import load
 
+DPI = 300  # print quality; 150 is screen-only
+
+
+def legend_below(ax, ncol_max=3, fontsize=9):
+    """Put the legend under the axes instead of inside them.
+
+    rliable draws into the top-left corner by default, which is exactly where a
+    sample-efficiency curve ends up. bbox_inches="tight" at save time keeps the
+    out-of-axes legend in the file.
+    """
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    ncol = min(ncol_max, max(1, (len(handles) + 1) // 2))
+    ax.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        ncol=ncol,
+        fontsize=fontsize,
+        frameon=False,
+    )
+
+
 METRICS = {
     "iqm": metrics.aggregate_iqm,
     "mean": metrics.aggregate_mean,
@@ -75,6 +100,31 @@ parser.add_argument(
 args = parser.parse_args()
 
 
+def simplify_labels(names):
+    """Drop a coefficient from every label if doing so leaves them all distinct.
+
+    Phase 2 pins both betas, so printing them six times says nothing -- the arms are
+    already named. A beta sweep is the opposite: the coefficient IS the condition, and
+    dropping it would collide two curves into one name, so it stays.
+    """
+
+    def strip(label, term):
+        if " (" not in label:
+            return label
+        # rsplit, not split: the coefficients are always the LAST bracket, and a base
+        # name can carry one of its own ("PPO+RND+LLM (warm)").
+        base, rest = label.rsplit(" (", 1)
+        kept = [p for p in rest.rstrip(")").split(", ") if not p.startswith(term)]
+        return f"{base} ({', '.join(kept)})" if kept else base
+
+    out = list(names)
+    for term in ("\u03b2_rnd", "\u03b2_llm"):
+        candidate = [strip(n, term) for n in out]
+        if len(set(candidate)) == len(set(out)):
+            out = candidate
+    return dict(zip(names, out, strict=True))
+
+
 def build_score_tensors(runs, envs=None):
     """-> (eval_steps, {condition: (num_runs, num_tasks, num_steps)}).
 
@@ -109,7 +159,23 @@ def build_score_tensors(runs, envs=None):
         score_dict[condition] = np.array(
             [[by_task[task][seed] for task in tasks] for seed in seeds]
         )
+    short = simplify_labels(list(score_dict))
+    score_dict = {short[k]: v for k, v in score_dict.items()}
     return eval_steps, score_dict, tasks
+
+
+FINAL_WINDOW = 10  # eval points averaged into a run's "final" score
+
+
+def final_scores(score_dict):
+    """A run's final score: the mean of its last FINAL_WINDOW evaluations.
+
+    Matches `hpo_objective(mode="final")` in the training code, so the figures and the
+    objective measure the same thing. Taking the single last eval instead is 20 episodes
+    rather than 200, and the difference is not cosmetic -- on the beta_llm sweep it
+    reversed the ranking of two settings that are otherwise tied.
+    """
+    return {c: v[..., -FINAL_WINDOW:].mean(axis=-1) for c, v in score_dict.items()}
 
 
 def sample_efficiency_curve(score_dict, eval_steps, metric="iqm", reps: int = 50_000, out=None):
@@ -132,11 +198,11 @@ def sample_efficiency_curve(score_dict, eval_steps, metric="iqm", reps: int = 50
     fig = plt.gcf()
     fig.set_size_inches(7, 4.5)
     step_axis(plt.gca())
-    plt.legend(fontsize=9)
+    legend_below(plt.gca())
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=150, bbox_inches="tight")
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
         print(f"wrote {out}")
     return point, cis
 
@@ -144,7 +210,7 @@ def sample_efficiency_curve(score_dict, eval_steps, metric="iqm", reps: int = 50
 def aggregate_interval_plot(score_dict, reps: int = 50_000, out=None):
     """Median / IQM / Mean / Optimality Gap at the FINAL eval point, with CIs."""
     # (runs, tasks, steps) -> (runs, tasks): rliable's aggregates want a matrix.
-    final = {cond: scores[..., -1] for cond, scores in score_dict.items()}
+    final = final_scores(score_dict)
 
     def four_metrics(scores):
         return np.array([METRICS[m](scores) for m in ("median", "iqm", "mean", "og")])
@@ -167,7 +233,7 @@ def aggregate_interval_plot(score_dict, reps: int = 50_000, out=None):
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=150, bbox_inches="tight")
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
         print(f"wrote {out}")
     return point, cis
 
@@ -183,7 +249,7 @@ def probability_of_improvement_plot(score_dict, baseline=None, reps: int = 50_00
     rliable has no get_probability_of_improvement here: PoI goes through
     get_interval_estimates with {"X,Y": (scores_x, scores_y)} pairs instead.
     """
-    final = {cond: scores[..., -1] for cond, scores in score_dict.items()}
+    final = final_scores(score_dict)
     if len(final) < 2:
         print("  ! probability of improvement needs >=2 conditions, skipped")
         return None, None
@@ -221,7 +287,7 @@ def probability_of_improvement_plot(score_dict, baseline=None, reps: int = 50_00
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=150, bbox_inches="tight")
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
         print(f"wrote {out}")
     return point, cis
 
@@ -255,13 +321,14 @@ def per_env_curves(score_dict, eval_steps, tasks, metric="iqm", reps: int = 50_0
             ticklabelsize="small",
         )
         step_axis(axes[0][i])
-        axes[0][i].set_title(task, fontsize="large")
-    axes[0][0].legend(fontsize=8)
+        if len(tasks) > 1:  # a single panel needs no title -- the caption says the env
+            axes[0][i].set_title(task, fontsize="large")
+    legend_below(axes[0][0], fontsize=8)
     fig.tight_layout()
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=150, bbox_inches="tight")
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
         print(f"wrote {out}")
     return fig
 
@@ -273,7 +340,7 @@ def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=
     and a solved episode pays a bit under 1, so tau ~= the fraction solved:
     0.5 means "solves more often than not", 0.9 "solves nearly every episode".
     """
-    final = {cond: scores[..., -1] for cond, scores in score_dict.items()}
+    final = final_scores(score_dict)
     taus = np.linspace(0.0, 1.0, 101)
     profiles, profile_cis = rly.create_performance_profile(final, taus, reps=reps)
 
@@ -288,11 +355,7 @@ def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=
 
     i = int(np.abs(taus - threshold).argmin())
     ax.axvline(threshold, color="0.35", linestyle="--", linewidth=1, zorder=0)
-    ax.set_title(
-        "  |  ".join(f"{c}: {profiles[c][i]:.0%} > {threshold:g}" for c in sorted(profiles)),
-        fontsize=9,
-    )
-    ax.legend(fontsize=9, loc="upper right")
+    legend_below(ax)  # the per-condition fractions are printed below, not crammed into a title
     fig.tight_layout()
 
     print(f"\nfraction of runs with final eval return > {threshold:g}:")
@@ -302,7 +365,7 @@ def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=
 
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=150, bbox_inches="tight")
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
         print(f"wrote {out}")
     return profiles, profile_cis
 
