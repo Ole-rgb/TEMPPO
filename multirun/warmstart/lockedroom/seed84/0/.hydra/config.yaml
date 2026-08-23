@@ -1,0 +1,49 @@
+env:
+  name: lockedroom
+  gym_id: MiniGrid-LockedRoom-v0
+  eval_interval: 50
+bonus:
+  name: rnd_llm_warmstart
+  beta_rnd: ${rnd.beta}
+  beta_llm: ${llm.beta}
+  anneal_llm_frac: 0.35
+exp_name: ppo_minigrid
+seed: 84
+torch_deterministic: true
+cuda: false
+capture_video: false
+env_id: ${env.gym_id}
+total_timesteps: 5000000
+schedule_timesteps: null
+learning_rate: 0.00025
+num_envs: 4
+num_steps: 128
+anneal_lr: true
+gamma: 0.99
+gae_lambda: 0.95
+num_minibatches: 4
+update_epochs: 4
+norm_adv: true
+clip_coef: 0.2
+clip_vloss: true
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
+target_kl: null
+eval_interval: ${env.eval_interval}
+eval_episodes: 20
+objective: auc
+rnd:
+  beta: 0.001
+  predictor_hidden_dim: 512
+  predictor_lr: 0.001
+  embed_dim: 512
+  normalize_intrinsic_reward: true
+llm:
+  beta: 0.25
+  subgoal_bonus: 1.0
+  model: claude-opus-4-8
+  cache_path: scripts/subgoal_cache_claude-opus-4-8.jsonl
+  cache_only: true
+  skip_go_to_goal: false
+  shuffle_plan: false

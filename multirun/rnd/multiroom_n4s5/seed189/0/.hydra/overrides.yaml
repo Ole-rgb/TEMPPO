@@ -1,0 +1,6 @@
+- env=multiroom_n4s5
+- total_timesteps=750000
+- seed=189
+- llm.skip_go_to_goal=False
+- llm.cache_only=True
+- bonus=rnd

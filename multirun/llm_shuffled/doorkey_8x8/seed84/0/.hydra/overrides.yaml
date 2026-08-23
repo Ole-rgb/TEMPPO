@@ -1,0 +1,7 @@
+- env=doorkey_8x8
+- total_timesteps=750000
+- seed=84
+- llm.skip_go_to_goal=False
+- llm.cache_only=True
+- bonus=llm
+- llm.shuffle_plan=True
