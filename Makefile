@@ -195,14 +195,18 @@ BASELINE ?= $(BASE_$(ENV))
 # The return counted as "solved" in the performance profile.
 THRESH_multiroom_n4s5 ?= 0.70
 THRESH_doorkey_8x8    ?= 0.80
-THRESH_lockedroom     ?= 0.25
+THRESH_lockedroom     ?= 0.5
 THRESHOLD ?= $(or $(THRESH_$(ENV)),0.5)
 
+# COLUMN swaps the return for a diagnostic column of eval_rewards.csv (entropy,
+# subgoals_completed, episodic_length) and emits just that curve.
+COLUMN ?=
 plots:                       ## rliable figures for ENV, into figures/<sweep>/<env>/
 	$(PYTHON) -m $(PKG).analysis.plots --run-dir $(SWEEPS) \
 	  --env $(PLOT_ENVS) --reps $(REPS) --out-dir $(FIGURES) \
 	  --success-threshold $(THRESHOLD) \
-	  $(if $(BASELINE),--baseline "$(BASELINE)")
+	  $(if $(BASELINE),--baseline "$(BASELINE)") \
+	  $(if $(COLUMN),--column $(COLUMN))
 
 # The reference each P(X > Y) panel is drawn against.
 BASE_RND  ?= PPO+RND (β_rnd=0.001)

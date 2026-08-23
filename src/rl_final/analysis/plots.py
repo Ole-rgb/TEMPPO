@@ -8,7 +8,9 @@ Run:
 """
 
 import argparse
+import re
 from collections import defaultdict
+from dataclasses import replace
 from functools import reduce
 from pathlib import Path
 
@@ -59,45 +61,41 @@ def step_axis(ax, max_ticks=5):
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1000:g}k" if v else "0"))
 
 
-parser = argparse.ArgumentParser(description="rliable figures from one or more sweeps")
-parser.add_argument(
-    "--run-dir",
-    type=Path,
-    nargs="+",
-    required=True,
-    help="One or more Hydra output dirs, e.g. multirun/2026-08-07/23-49-39. "
-    "Several are merged, so a baseline swept on one day can be compared against "
-    "another condition swept later. They must not repeat an (env, condition, seed).",
-)
-parser.add_argument("--env", nargs="+", default=None)
-parser.add_argument(
-    "--success-threshold",
-    type=float,
-    default=0.5,
-    help="eval return counted as 'solved' in the performance profile. MiniGrid pays "
-    "1 - 0.9*steps/max_steps on success and 0 otherwise, and eval reports the mean over "
-    "episodes, so 0.5 ~= 'solves more often than not' and 0.9 ~= 'solves nearly every one'.",
-)
-parser.add_argument("--metric", choices=list(METRICS), default="iqm")
-parser.add_argument(
-    "--reps",
-    type=int,
-    default=50_000,
-    help="stratified-bootstrap resamples (lower it to iterate faster)",
-)
-parser.add_argument(
-    "--baseline",
-    default=None,
-    help='condition every other is compared against for P(X > Y); defaults to "PPO". '
-    'Use "PPO+RND" to ask whether the LLM signal adds anything beyond novelty.',
-)
-parser.add_argument(
-    "--out-dir",
-    type=Path,
-    default=Path("figures"),
-    help="directory the figures are written to (one PNG per plot)",
-)
-args = parser.parse_args()
+def read_column(run_dir, name):
+    """One named column of a run's eval CSV.
+
+    `eval_rewards.csv` carries the diagnostics beside the return -- entropy,
+    subgoals_completed, episodic_length -- on the same eval-step grid, so any of
+    them can be swapped in for the return and get the same rliable treatment.
+    """
+    rows = np.genfromtxt(run_dir / "eval_rewards.csv", delimiter=",", names=True)
+    return np.atleast_1d(rows[name])
+
+
+def diagnostic_curve(score_dict, eval_steps, column, reps=50_000, out=None):
+    """IQM of one diagnostic column per eval point, with bootstrap CIs."""
+    point, cis = rly.get_interval_estimates(
+        score_dict,
+        lambda x: np.array([metrics.aggregate_iqm(x[..., t]) for t in range(x.shape[-1])]),
+        reps=reps,
+    )
+    plot_utils.plot_sample_efficiency_curve(
+        eval_steps,
+        point,
+        cis,
+        algorithms=list(score_dict),
+        xlabel="Environment steps",
+        ylabel=f"IQM {column.replace('_', ' ')}",
+    )
+    fig = plt.gcf()
+    fig.set_size_inches(7, 4.5)
+    step_axis(plt.gca())
+    legend_below(plt.gca())
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=DPI, bbox_inches="tight")
+        print(f"wrote {out}")
+    return point, cis
 
 
 def simplify_labels(names):
@@ -238,6 +236,28 @@ def aggregate_interval_plot(score_dict, reps: int = 50_000, out=None):
     return point, cis
 
 
+def resolve_baseline(final, baseline=None):
+    """Condition that P(X > Y) is measured against; None picks the default."""
+    if baseline is None:  # plain PPO if it is there, else whatever sorts first
+        return "PPO" if "PPO" in final else sorted(final)[0]
+    if baseline in final:
+        return baseline
+    # Labels carry their coefficients ("PPO+RND (β_rnd=0.1)"), so accept the bare
+    # name too rather than making the caller type the betas exactly.
+    hits = [c for c in final if c.startswith(f"{baseline} (")]
+    if len(hits) != 1:
+        raise SystemExit(
+            f"baseline {baseline!r} matches {len(hits)} conditions; pick one of {sorted(final)}"
+        )
+    return hits[0]
+
+
+def baseline_slug(name):
+    """Filename-safe form of a condition label: ASCII, no spaces or brackets."""
+    ascii_only = name.encode("ascii", "ignore").decode()
+    return re.sub(r"_+", "_", re.sub(r"[^\w+.=-]+", "_", ascii_only)).strip("_")
+
+
 def probability_of_improvement_plot(score_dict, baseline=None, reps: int = 50_000, out=None):
     """P(X > Y) per condition against one baseline, with stratified-bootstrap CIs.
 
@@ -254,17 +274,7 @@ def probability_of_improvement_plot(score_dict, baseline=None, reps: int = 50_00
         print("  ! probability of improvement needs >=2 conditions, skipped")
         return None, None
 
-    if baseline is None:  # plain PPO if it is there, else whatever sorts first
-        baseline = "PPO" if "PPO" in final else sorted(final)[0]
-    elif baseline not in final:
-        # Labels carry their coefficients ("PPO+RND (β_rnd=0.1)"), so accept the
-        # bare name too rather than making the caller type the betas exactly.
-        hits = [c for c in final if c.startswith(f"{baseline} (")]
-        if len(hits) != 1:
-            raise SystemExit(
-                f"baseline {baseline!r} matches {len(hits)} conditions; pick one of {sorted(final)}"
-            )
-        baseline = hits[0]
+    baseline = resolve_baseline(final, baseline)
 
     # NOT "," -- condition_label writes "PPO+RND+LLM (β_rnd=0.1, β_llm=0.5)", and
     # rliable splits each pair key on the separator expecting exactly two halves.
@@ -371,14 +381,75 @@ def performance_profile_plot(score_dict, reps: int = 50_000, threshold=0.5, out=
 
 
 def main():
+    parser = argparse.ArgumentParser(description="rliable figures from one or more sweeps")
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="One or more Hydra output dirs, e.g. multirun/2026-08-07/23-49-39. "
+        "Several are merged, so a baseline swept on one day can be compared against "
+        "another condition swept later. They must not repeat an (env, condition, seed).",
+    )
+    parser.add_argument("--env", nargs="+", default=None)
+    parser.add_argument(
+        "--success-threshold",
+        type=float,
+        default=0.5,
+        help="eval return counted as 'solved' in the performance profile. MiniGrid pays "
+        "1 - 0.9*steps/max_steps on success and 0 otherwise, and eval reports the mean over "
+        "episodes, so 0.5 ~= 'solves more often than not' and 0.9 ~= 'solves nearly every one'.",
+    )
+    parser.add_argument("--metric", choices=list(METRICS), default="iqm")
+    parser.add_argument(
+        "--column",
+        default="eval_rewards",
+        help="which column of eval_rewards.csv to analyse. The default is the return, "
+        "which produces the full set of study figures. Any other column (entropy, "
+        "subgoals_completed, episodic_length) produces just its own IQM curve -- the "
+        "aggregates and profiles are only meaningful for a return.",
+    )
+    parser.add_argument(
+        "--reps",
+        type=int,
+        default=50_000,
+        help="stratified-bootstrap resamples (lower it to iterate faster)",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help='condition every other is compared against for P(X > Y); defaults to "PPO". '
+        'Use "PPO+RND" to ask whether the LLM signal adds anything beyond novelty.',
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("figures"),
+        help="directory the figures are written to (one PNG per plot)",
+    )
+    args = parser.parse_args()
 
     runs = load(args.run_dir)
+    if args.column != "eval_rewards":
+        # Everything downstream reads `returns`, so swapping the column in there
+        # gets the diagnostic the same grid, seeds and interval treatment.
+        runs = [replace(r, returns=read_column(r.run_dir, args.column)) for r in runs]
     eval_steps, score_dict, tasks = build_score_tensors(runs, args.env)
 
     print(f"\ntasks (num_tasks={len(tasks)}): {', '.join(tasks)}")
     print(f"eval points: {len(eval_steps)}, up to {eval_steps[-1]:,} env steps")
     for condition, scores in score_dict.items():
         print(f"  {condition:<28} tensor {scores.shape}  (runs, tasks, steps)")
+
+    if args.column != "eval_rewards":
+        diagnostic_curve(
+            score_dict,
+            eval_steps,
+            args.column,
+            reps=args.reps,
+            out=args.out_dir / f"{args.column}.png",
+        )
+        return
 
     sample_efficiency_curve(
         score_dict,
@@ -392,11 +463,16 @@ def main():
         reps=args.reps,
         out=args.out_dir / "aggregates.png",
     )
+    # A non-default baseline answers a different question ("beyond novelty?" rather
+    # than "better than nothing?"), so it gets its own file instead of overwriting.
+    final = final_scores(score_dict)
+    chosen = resolve_baseline(final, args.baseline)
+    suffix = "" if chosen == resolve_baseline(final) else f"_{baseline_slug(chosen)}"
     probability_of_improvement_plot(
         score_dict,
         baseline=args.baseline,
         reps=args.reps,
-        out=args.out_dir / "probability_of_improvement.png",
+        out=args.out_dir / f"probability_of_improvement{suffix}.png",
     )
     per_env_curves(
         score_dict,

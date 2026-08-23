@@ -413,9 +413,6 @@ def test_pinned_lr_horizon_is_a_distinct_condition():
 def test_coefficients_are_dropped_only_when_labels_stay_distinct():
     """Phase 2 pins both betas, so they are noise; a beta sweep needs them to tell
     its curves apart. The rule is the same either way -- drop what stays unique."""
-    import sys
-
-    sys.argv = ["x", "--run-dir", "."]
     from rl_final.analysis.plots import simplify_labels
 
     phase2 = simplify_labels(

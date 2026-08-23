@@ -163,22 +163,40 @@ make plots-sensitivity
 make plots
 make plots ENV=doorkey_8x8
 make plots ENV=lockedroom
+
+# probability-of-improvement panels against a non-default baseline
+make plots BASELINE="PPO+RND"                    # does the LLM add anything beyond novelty?
+make plots BASELINE="PPO+LLM"                    # does anything improve on plain subgoals?
+make plots ENV=doorkey_8x8 BASELINE="PPO+LLM"    # the same, on the second environment
+
+# diagnostics: why a result happened, not what happened
+make plots ENV=lockedroom COLUMN=entropy         # the policy collapse behind the LockedRoom null
 ```
 
 Figures land in `figures/<sweep>/<env>/`, one directory per (sweep, environment) pair, so
-nothing overwrites anything.
+sweeps never collide. Re-running the same sweep does rewrite its own files.
 
 `THRESHOLD` is the return counted as "solved" in the performance profile, and scales with
-what each env can reach: 0.70 MultiRoom, 0.80 DoorKey, 0.25 LockedRoom (nothing there gets
+what each env can reach: 0.70 MultiRoom, 0.80 DoorKey, 0.5 LockedRoom (nothing there gets
 near its ceiling). The Makefile picks it per env -- override only to test sensitivity.
 
 `REPS` (default 10,000) is the bootstrap resample count. It does not narrow the intervals --
 seed count sets their width -- so raising it only stabilises the printed endpoints, at about
 50 min per curve figure at 50k. Use `REPS=2000` while iterating.
 
-`BASELINE` is the reference each `P(X > Y)` panel is drawn against; the Makefile sets it
-per env. Only LockedRoom needs one -- it has no PPO arm, so the fallback would pick
-alphabetically rather than the arm that actually works there.
+`BASELINE` is the reference each `P(X > Y)` panel is drawn against. It defaults to plain PPO
+where that arm exists. LockedRoom has no PPO arm, so the Makefile names one per env there -- otherwise the fallback would pick alphabetically rather than the arm that actually works.
+`plots-sensitivity` passes its own for the same reason.
+
+A non-default baseline is written as `probability_of_improvement_<baseline>.png` beside the default panel.
+
+The return says what happened; the other columns of `eval_rewards.csv` say why. `entropy`,
+`subgoals_completed` and `episodic_length` get the same IQM-with-bootstrap-CI treatment:
+
+```
+make plots ENV=lockedroom COLUMN=subgoals_completed
+make plots ENV=doorkey_8x8 COLUMN=episodic_length
+```
 
 Never pool environments in one figure: return ceilings differ (MultiRoom ~0.78, DoorKey
 ~0.97), so a pooled aggregate tracks the easier task and hides that a bonus can help on one
