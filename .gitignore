@@ -9,9 +9,9 @@ __pycache__/
 .ruff_cache/
 data/
 runs/
-figures/
 .env
 logs/
-multirun_sens/
-multirun/
+*.log
+*.0
+agent.pt
 writing/
